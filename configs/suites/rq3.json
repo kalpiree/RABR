@@ -69,7 +69,7 @@
       "v_max": 8,
       "score_mode": "equation8",
       "ablation": "none",
-      "output_size_policy": "training_median",
+      "output_size_policy": "training_mean",
       "device": "cuda:0",
       "cpu_threads": 4
     }
@@ -77,8 +77,9 @@
   "timeout_seconds": 21600,
   "rq": "rq3",
   "protocol_notes": [
-    "Equation (8) has no explicit appearance-frequency term. The frequency/similarity ablation uses an explicitly reconstructed alternate scorer.",
-    "The main-paper ablation backbone is Llama3.1-8B; all three domains include the appendix experiments."
+    "Equation (8) is authoritative. Components are grounding similarity and history-based user relevance.",
+    "The fixed-K construction baseline uses the uncapped rounded mean training bundle cardinality.",
+    "Both fixed-K constructions use the selected budget from the matching adaptive Equation (8) calibration; test outcomes never select K or budget."
   ],
   "experiments": [
     {
@@ -87,25 +88,16 @@
     },
     {
       "method": "rabr",
-      "variant": "frequency_similarity",
+      "variant": "without_grounding",
       "parameters": {
-        "score_mode": "frequency_similarity"
+        "ablation": "without_grounding"
       }
     },
     {
       "method": "rabr",
-      "variant": "without_frequency",
+      "variant": "without_relevance",
       "parameters": {
-        "score_mode": "frequency_similarity",
-        "ablation": "without_frequency"
-      }
-    },
-    {
-      "method": "rabr",
-      "variant": "without_similarity",
-      "parameters": {
-        "score_mode": "frequency_similarity",
-        "ablation": "without_similarity"
+        "ablation": "without_relevance"
       }
     },
     {
@@ -116,22 +108,22 @@
       "method": "rabr",
       "variant": "multi_sample_fixed_k",
       "parameters": {
-        "ablation": "multi_sample_fixed_k"
+        "ablation": "multi_sample_fixed_k",
+        "output_size_policy": "training_mean",
+        "sampling_budget_policy": "paper_rabr_selected",
+        "reference_rq": "rq3",
+        "reference_variant": "equation8_reference"
       }
     },
     {
       "method": "rabr",
       "variant": "rabr_fixed_k",
       "parameters": {
-        "ablation": "fixed_k"
-      }
-    },
-    {
-      "method": "rabr",
-      "variant": "fixed_threshold",
-      "parameters": {
-        "ablation": "fixed_threshold",
-        "fixed_threshold": 0.5
+        "ablation": "fixed_k",
+        "output_size_policy": "training_mean",
+        "sampling_budget_policy": "paper_rabr_selected",
+        "reference_rq": "rq3",
+        "reference_variant": "equation8_reference"
       }
     }
   ]

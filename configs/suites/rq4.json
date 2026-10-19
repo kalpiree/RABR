@@ -70,7 +70,7 @@
       "v_max": 8,
       "score_mode": "equation8",
       "ablation": "none",
-      "output_size_policy": "training_median",
+      "output_size_policy": "training_mean",
       "device": "cuda:0",
       "cpu_threads": 4
     }
@@ -78,7 +78,7 @@
   "timeout_seconds": 21600,
   "rq": "rq4",
   "protocol_notes": [
-    "Calibration fractions .25,.5,.75,1 are a declared additional grid because the question mentions calibration size but the manuscript does not specify its grid.",
+    "Paper RQ4 sweeps alpha, delta, beta, and sampling budget. Optional calibration-size sensitivity is separate.",
     "Budget s means the single predeclared prefix budget [s]."
   ],
   "experiments": [
@@ -151,22 +151,6 @@
           8,
           9,
           10
-        ]
-      }
-    },
-    {
-      "method": "rabr",
-      "variant": "calibration_size",
-      "parameters": {
-        "alpha": 0.1,
-        "delta": 0.1
-      },
-      "grid": {
-        "calibration_fraction": [
-          0.25,
-          0.5,
-          0.75,
-          1
         ]
       }
     }

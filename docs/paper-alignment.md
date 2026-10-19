@@ -1,46 +1,39 @@
 # Alignment with the manuscript
 
-This version provides executable reconstructions and experiment workflows. It is not a verified reproduction of every original method or of the manuscript's four experimental sections. Some differences are task adaptations; others are missing implementation steps. They should not be treated interchangeably.
+This repository implements the method formulation and explicitly separates evaluation adaptations from original method components. Original manuscript split IDs, complete prompts, author checkpoints and several native feature assets are unavailable. Running the code does not recover those artifacts or establish numerical reproduction.
 
-## RABR
+## RABR and the four research questions
 
-The calibration module implements nearest-title grounding, raw-cosine acceptance, within-generation averaging, matching-generation averaging, Equation 8 weighted scoring, inclusive threshold selection, set F-beta loss, one-sided KL p-values, Bonferroni correction, and minimum-budget / maximum-threshold selection. A failed certificate remains `no_certified_pair`.
+RABR now supplies accumulated grounded candidates to every subsequent generation, derives relevance only from prior interactions, and implements Equation 8 without an invented frequency term. The grounding averages, bounded F-beta loss, KL test, Bonferroni correction, threshold inclusion and minimum-budget/maximum-threshold choice follow the numbered formulation. Empty-history handling is explicit; the default requires genuine history.
 
-Two implementation gaps remain in the generation and relevance path:
-
-- Section 3.1 requires each generation prompt to include accumulated candidate titles and request additional, nonrepeated items. The current runner reuses the same prompt across rounds. It accumulates grounded scores but does not supply that pool to subsequent prompts.
-- Equation 8 derives the user-profile embedding from interaction history. The current encoder input combines intent and history. A faithful history-only profile, including an explicit empty-history policy, has not been implemented.
-
-Gamma, grounding threshold, sentence encoder, description limit, threshold grid, and exact prompts are declared reconstruction choices where the manuscript does not provide a complete executable specification.
-
-Equation 8 does not include generation frequency, while RQ3 and Appendix B.3 describe a frequency component. The separate `frequency_similarity` scorer is a chosen interpretation, not an author-specified formula. This ambiguity must be resolved before claiming an exact RQ3 reproduction.
-
-## Baselines
-
-| Method | Difference in this repository |
+| Workflow | Implemented rule |
 |---|---|
-| POG | Reconstructed Transformer/FOM training. Original image/CF features and multimodal category-triplet pretraining are absent; title/category hashing and an intent token replace those inputs. Fixed-K inference suppresses EOS. |
-| BGN | Reconstructed text-CNN/LSTM/feature-softmax and bundle-level DPP. Full-catalog cross-entropy and fixed-K decoding replace the original sampled-softmax/variable-length setup. |
-| BUNT | Learned cloze and policy components are present, but the standard experiment profile has no respondent and uses one-shot prediction. It does not reproduce the original 20-turn interaction experiment. |
-| BYOB | Reconstructed B-M reward/pointer/PPO pipeline. Original NCF/item2vec assets, persistent-user representation, optional candidate encoders, and distributed optimizer are not reproduced. |
-| Zero-shot | Direct prompting with shared JSON parsing and full-catalog grounding. Exact manuscript prompts are unavailable. |
-| LLM4B | Retains retrieval followed by LLM selection, using the shared query/history protocol and sentence encoder. |
-| Text2Bundle | Retains learned graph/FM/Transformer/BPR/DQN components. Training-only interactions and the shared encoder replace the external Amazon pretraining graph and RoBERTa features. Hyperparameters are repository defaults. |
-| AICL | Original observed-session grouping is adapted to query/history recommendation. Different evaluator models are replaced by independent seeds of one backbone. |
-| KD4BG | Teacher-rule extraction and LoRA student fitting are reconstructed for the shared task with a new category miner. PatternICL is a separately labeled partial configuration, not another baseline or the complete distilled method. |
-| DDBC | Retains RVQ item coding and masked diffusion. Shared text features replace CLHE; inference uses a query-derived seed and stricter full-catalog distinct-item constraints. SDPA replaces FlashAttention. |
+| RQ1 | RABR calibration dependencies for fixed-size conventional adapters and stochastic LLM recommendation samples; matched-seed paired two-sided tests and explicit reference-backbone conditions |
+| RQ2 | Risk-target sweep using the same corrected generation and calibration paths; uncertified outcomes remain terminal |
+| RQ3 | Equation 8 reference, grounding removal, relevance removal, independent fixed-K sampling, RABR fixed-K, and zero-shot; fixed K is uncapped rounded training mean |
+| RQ4 | Alpha, delta, beta and generation-budget sweeps; calibration-size extension lives separately in `sensitivity.json` |
 
-The detailed method documents include primary sources, checkpoint choices, objectives, and omitted original assets.
+The manuscript's frequency discussion is inconsistent with its equation. The implementation follows the method formulation, so the component names and resulting ablation columns should be grounding and relevance. No numerical frequency-ablation claim is made.
 
-## Research questions
+## Baseline components and protocol boundaries
 
-| Question | Implemented workflow | Remaining alignment issues |
+| Method | Corrected implementation | Remaining input or evaluation boundary |
 |---|---|---|
-| RQ1 | All eleven method entries, two backbones where applicable, three domains, five seeds, shared metrics | Adapted methods and fresh splits; training-median K instead of the manuscript's RABR-average rule by default; no shared RABR-selected sampling-budget dependency; no paired two-sided significance test |
-| RQ2 | Calibration and empirical-risk sweep over alpha | Inherits the RABR generation/profile gaps and reconstructed data protocol; an empirical curve does not establish the theorem's sampling assumptions |
-| RQ3 | Score-component and bundle-construction ablations | Frequency formula is unresolved; fixed-K uses capped training median whereas the manuscript's construction comparison specifies training mean; inherits the generation gap |
-| RQ4 | Alpha, delta, beta, and sampling-budget sweeps; an additional calibration-size sweep | Inherits RABR/protocol gaps; calibration-size grid is an explicit extension rather than a recovered manuscript setting |
+| POG | Native-dimensional image/TextCNN/CF inputs, category-triplet fusion, separate Per/FOM/Gen computation and masked training | Original Behemoth CF features are proprietary; the native profile requires them. RABR fixed-K decoding is explicitly distinct from native EOS decoding. |
+| BGN | ID/category feature-aware CNN/LSTM, sampled output loss, native EOS penalty and full bundle-list DPP | Fixed-K RABR evaluation is an explicit decoder adaptation; the original bundle-list task differs from one-bundle recommendation. |
+| BUNT | Hierarchical cloze pretraining, separate item/category/attribute policies, manager PPO and genuine repeated feedback with slot replenishment | Requires real tags and historical bundle groups. Native feedback-assisted results are reported separately from query-only methods. |
+| BYOB | Pinned original pointer/NCF/SkipGram definitions, compatibility threshold, item-to-bundle reward curriculum, undiscounted PPO | Requires persistent users, training interactions/click sequences and target-independent candidate pools. Fixed-K RABR training is a declared evaluation adaptation. |
+| Zero-shot | One completion, strict parsing and catalog grounding | Exact manuscript prompt and encoder snapshot are not available. |
+| LLM4B | Retrieval followed by constrained LLM selection | Query/history full-catalog evaluation and repeated-sample aggregation are declared. |
+| Text2Bundle | External RoBERTa/LightGCN features, full sparse FM interactions, state/action Transformers, BPR and double DQN | Requires original-style assets. The source paper has unresolved dimensional descriptions; see its method document. |
+| AICL | Training-only correction/feedback, two genuinely distinct evaluator models with the source rating scales | Local model identities differ from the released proprietary evaluators. Query/history recommendation remains an adaptation of observed-session grouping. |
+| KD4BG | Apriori category sets, teacher prediction/error review/rules/thoughts, response-only LoRA with batch/accumulation/warmup/linear schedule | Fresh teacher corpus, Transformers/PEFT runtime, semantic knowledge retrieval and query/history task differ from the released observed-session experiment. |
+| DDBC | Verified CLHE features, RVQ, level-wise legal-token diffusion and explicit supplied seeds | Full-catalog retrieval avoids target-built candidate pools. Variable-length training batches and the optional query-seed adapter are declared separately. |
 
-The raw-data protocol chooses one bundle per session, splits whole timestamp groups near 60/30/10, reserves a final portion of training for validation, uses strictly earlier histories, and treats annotated intents as assumed queries. Original split IDs are unavailable. These decisions change the experiment and must be retained in any result description.
+See [traditional methods](traditional-methods.md), [generative methods](generative-methods.md), [Text2Bundle](text2bundle.md) and [DDBC](ddbc.md) for asset formats and pinned primary sources. Asset requirements are operational prerequisites; synthetic arrays used in small verification checks are not research features.
 
-The optional `paper_rabr_mean` policy derives K from a completed matching RABR run's calibration outputs. It is safer than choosing K from test predictions, but is not enabled by the default suites. Aggregation currently reports seed means and standard deviations; significance testing remains separate work.
+## Data and claims
+
+The raw protocol selects one annotated bundle per session, splits whole timestamp groups near 60/30/10 and reserves the final part of training for validation. Annotated intents are treated as assumed queries. Optional pretraining histories use only genuine earlier same-user events. Optional history eligibility is applied before splitting and recorded in the manifest. These choices define a fresh benchmark, not the missing original partitions.
+
+Tests and small integration runs check equations, gradient flow, response-only labels, interaction boundaries, source/asset identity, calibration dependencies and checkpoint recovery. They do not establish convergence, original checkpoint equivalence or theorem sampling assumptions. Earlier experiment results have different source/protocol identities and cannot be relabeled as outputs of this corrected implementation.

@@ -19,6 +19,8 @@ def input_only(row: dict) -> dict:
                for item in source.get("history", [])]
     result = {"session_id": str(row["session_id"]), "timestamp": row.get("timestamp"),
               "input": {"intent": str(source.get("intent", "")), "history": history}}
+    if "seed_items" in source:
+        result["input"]["seed_items"] = list(source["seed_items"])
     if "user_id" in row:
         result["user_id"] = str(row["user_id"])
     return result

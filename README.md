@@ -4,11 +4,13 @@ Code for risk-adaptive bundle recommendation and a shared evaluation of POG, BUN
 
 This repository reconstructs the methods on a documented chronological BundleRec protocol. Original manuscript splits and trained checkpoints are not distributed. Generated results describe this protocol; they do not reproduce the manuscript's numerical tables. Method adaptations and source references are recorded in [traditional methods](docs/traditional-methods.md), [generative methods](docs/generative-methods.md), and [RABR protocol](docs/rabr-protocol.md).
 
-## Implementation status
+## Implementation scope
 
-The RQ1–RQ4 workflows are executable, but this version is not a paper-faithful replication. Several baseline architectures, features, and interaction protocols are reconstructed. RABR's grounding and calibration algebra are implemented; candidate-aware inter-round prompting is still missing, and its user-relevance embedding includes intent as well as history. RQ1 sampling-budget matching and paired significance testing are not implemented. Fixed output-size defaults also differ from the manuscript.
+RABR follows Equation 8 with candidate feedback between rounds, history-only relevance, finite-grid calibration and matching component ablations. RQ1 size/budget dependencies and paired seed-level significance analysis are implemented. A failed certificate remains a failed certificate.
 
-The frequency-based RQ3 score is an explicit interpretation of an inconsistency between Equation 8 and the appendix. It is not a recovered author formula. Small integration checks establish execution and persistence behavior, not published-model equivalence or convergence. See [paper alignment](docs/paper-alignment.md) for the method-by-method differences and remaining work.
+The learned baselines require their actual feature and interaction inputs. POG requires image/TextCNN/collaborative features; BUNT requires native tags and historical bundles; BYOB requires its pinned source, user interactions and candidate pools; Text2Bundle requires RoBERTa/LightGCN/FM assets; DDBC requires CLHE features and supplied seed items for its native path. Those assets are not silently replaced with hashes, generic text vectors or intent proxies. See [paper alignment](docs/paper-alignment.md) for the evaluation adapters and remaining source/data limitations.
+
+Small integration checks establish execution, gradient flow and recovery, not model convergence or equivalence to unavailable author checkpoints. BUNT feedback-assisted and DDBC supplied-seed results remain separate from query-only comparisons.
 
 ## Install
 
@@ -17,7 +19,7 @@ Use Python 3.11 on Linux for the full method suite. CUDA is recommended for expe
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install -c requirements/constraints.txt -e '.[models,diffusion,distillation]'
+python -m pip install -c requirements/constraints.txt -e '.[models,diffusion,distillation,quantization]'
 ```
 
 The `distillation` extra adds PEFT for KD4BG student adaptation. It can be omitted for configurations that do not train a student. Model loading uses local files by default. No model weights or research data are included.
@@ -27,10 +29,10 @@ The `distillation` extra adds PEFT for KD4BG student adaptation. It can be omitt
 ```bash
 git clone https://github.com/BundleRec/bundle_recommendation.git data/raw/BundleRec
 git -C data/raw/BundleRec checkout 087da2e2b4d8738ef23f3f6f2005505e8685edde
-python scripts/prepare_data.py --source data/raw/BundleRec/dataset --output data/processed --mode raw
+python scripts/prepare_data.py --source data/raw/BundleRec/dataset --output data/processed --mode raw --include-pretrain-history --require-history
 ```
 
-The preparation command validates catalog IDs, separates whole timestamp groups, mines patterns from training targets, and writes hashes for every input file. Training, validation, calibration, and test are separate partitions. See [reproduction instructions](docs/reproduce.md) for source layouts, prepared-data import, output-size choices, queue recovery, and aggregation.
+This command selects the history-eligible cohort before splitting and records that choice. The preparation command validates catalog IDs, separates whole timestamp groups, mines patterns from training targets, and writes hashes for every input file. Training, validation, calibration, and test are separate partitions. See [reproduction instructions](docs/reproduce.md) for source layouts, prepared-data import, output-size choices, queue recovery, and aggregation.
 
 ## Configure models
 
@@ -41,9 +43,12 @@ export RABR_LLAMA_PATH=/path/to/Llama-3.1-8B-Instruct
 export RABR_QWEN_PATH=/path/to/Qwen2.5-7B-Instruct
 export RABR_ENCODER_PATH=/path/to/all-MiniLM-L6-v2
 export RABR_STUDENT_MODEL_PATH=/path/to/student-instruct-model
+export RABR_KD_TEACHER_PATH=/path/to/teacher-instruct-model
+export RABR_AICL_RATER1_PATH=/path/to/first-evaluator-model
+export RABR_AICL_RATER2_PATH=/path/to/different-evaluator-model
 ```
 
-The backbone files in `configs/backbones/` set temperature, token limits, precision, and device. Snapshot provenance should be retained alongside downloaded weights. A run records the local file inventory; the inventory is not a cryptographic hash of model weights.
+Configure the native asset manifests described in the method documents before launching the full suite. The backbone files in `configs/backbones/` set temperature, token limits, precision, and device. Snapshot provenance should be retained alongside downloaded weights. A run records the local file inventory; the inventory is not a cryptographic hash of model weights.
 
 ## Run experiments
 
@@ -68,7 +73,8 @@ Completed runs include label-free predictions, per-session evaluation, metrics, 
 | RQ1 | All 11 methods; two backbones where applicable; three domains; five seeds |
 | RQ2 | RABR empirical risk across target risk levels |
 | RQ3 | Score components and bundle construction ablations |
-| RQ4 | Risk level, confidence level, F-beta weight, sampling budget, and calibration size |
+| RQ4 | Risk level, confidence level, F-beta weight, and sampling budget |
+| Optional sensitivity | Separate calibration-size extension |
 
 ## Layout
 

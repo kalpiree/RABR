@@ -4,9 +4,24 @@
     "self_correction_rounds": 1,
     "bundle_feedback_rounds": 3,
     "intent_feedback_rounds": 1,
-    "intent_raters": 2,
     "rater_repeats": 3,
     "grounding_tau": 0.0,
-    "implementation": "train_neighbor_mutual_correction_auto_feedback"
+    "implementation": "train_neighbor_mutual_correction_auto_feedback",
+    "intent_evaluator_backends": [
+      {
+        "type": "transformers",
+        "model_path": "${RABR_AICL_RATER1_PATH}",
+        "device": "cuda",
+        "dtype": "bfloat16",
+        "temperature": 0.7
+      },
+      {
+        "type": "transformers",
+        "model_path": "${RABR_AICL_RATER2_PATH}",
+        "device": "cuda",
+        "dtype": "bfloat16",
+        "temperature": 0.7
+      }
+    ]
   }
 }

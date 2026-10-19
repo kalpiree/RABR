@@ -70,7 +70,7 @@
       "v_max": 8,
       "score_mode": "equation8",
       "ablation": "none",
-      "output_size_policy": "training_median",
+      "output_size_policy": "training_mean",
       "device": "cuda:0",
       "cpu_threads": 4
     }
@@ -79,25 +79,77 @@
   "rq": "rq1",
   "protocol_notes": [
     "Fresh reconstruction: original partition IDs, prompts and checkpoints are unavailable.",
-    "Fixed-K methods use the final-training median; paper_rabr_mean is an optional calibration-only dependency policy.",
-    "KD4BG and DDBC are additional recent baselines; the manuscript contains the other nine methods."
+    "Traditional K is rounded from the matched RABR calibration mean. Separate reference-backbone conditions avoid choosing or pooling backbones implicitly.",
+    "KD4BG and DDBC are additional recent baselines; the manuscript contains the other nine methods.",
+    "LLM4B/AICL/KD4BG match final recommendation completions to the matching RABR-selected budget; training calls are separate. Zero-shot uses one completion.",
+    "BUNT is feedback-assisted and is excluded from query-only paired comparisons. RQ1 DDBC explicitly uses the query-seed/full-bundle adapter with native CLHE features and levelwise diffusion; supplied-seed completion is a separate configuration."
   ],
   "experiments": [
     {
       "method": "pog",
-      "variant": "main"
+      "variant": "main",
+      "config": {
+        "algorithm": {
+          "output_size_policy": "paper_rabr_mean",
+          "decoding": "fixed_k",
+          "evaluation_protocol": "rabr_fixed_k",
+          "hidden_dim": 512,
+          "embedding_dim": 512,
+          "layers": 6,
+          "per_layers": 6,
+          "heads": 8
+        }
+      },
+      "grid": {
+        "reference_backbone": [
+          "qwen25-7b",
+          "llama31-8b"
+        ]
+      }
     },
     {
       "method": "bunt",
-      "variant": "main"
+      "variant": "feedback_assisted",
+      "config": {
+        "algorithm": {
+          "output_size_policy": "training_mean",
+          "evaluation_protocol": "interactive_target_feedback"
+        }
+      }
     },
     {
       "method": "bgn",
-      "variant": "main"
+      "variant": "main",
+      "config": {
+        "algorithm": {
+          "output_size_policy": "paper_rabr_mean",
+          "decoding": "fixed_k",
+          "evaluation_protocol": "rabr_fixed_k"
+        }
+      },
+      "grid": {
+        "reference_backbone": [
+          "qwen25-7b",
+          "llama31-8b"
+        ]
+      }
     },
     {
       "method": "byob",
-      "variant": "main"
+      "variant": "main",
+      "config": {
+        "algorithm": {
+          "output_size_policy": "paper_rabr_mean",
+          "evaluation_protocol": "rabr_fixed_k",
+          "exploration_rate": 0.2
+        }
+      },
+      "grid": {
+        "reference_backbone": [
+          "qwen25-7b",
+          "llama31-8b"
+        ]
+      }
     },
     {
       "method": "zero_shot",
@@ -105,7 +157,12 @@
     },
     {
       "method": "llm4b",
-      "variant": "main"
+      "variant": "main",
+      "config": {
+        "algorithm": {
+          "sampling_budget_policy": "paper_rabr_selected"
+        }
+      }
     },
     {
       "method": "text2bundle",
@@ -113,15 +170,36 @@
     },
     {
       "method": "aicl",
-      "variant": "main"
+      "variant": "main",
+      "config": {
+        "algorithm": {
+          "sampling_budget_policy": "paper_rabr_selected"
+        }
+      }
     },
     {
       "method": "kd4bg",
-      "variant": "main"
+      "variant": "main",
+      "config": {
+        "algorithm": {
+          "sampling_budget_policy": "paper_rabr_selected"
+        }
+      }
     },
     {
       "method": "ddbc",
-      "variant": "main"
+      "variant": "query_seed_adapter",
+      "config": {
+        "algorithm": {
+          "implementation": "clhe_levelwise_diffusion_with_explicit_query_seed_adapter",
+          "context_mode": "query_seed",
+          "feature_mode": "clhe",
+          "decoder": "levelwise",
+          "output_mode": "full_bundle",
+          "evaluation_protocol": "query_only_full_bundle",
+          "evaluation_target_policy": "full_target_bundle"
+        }
+      }
     },
     {
       "method": "rabr",

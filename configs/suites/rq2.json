@@ -70,7 +70,7 @@
       "v_max": 8,
       "score_mode": "equation8",
       "ablation": "none",
-      "output_size_policy": "training_median",
+      "output_size_policy": "training_mean",
       "device": "cuda:0",
       "cpu_threads": 4
     }

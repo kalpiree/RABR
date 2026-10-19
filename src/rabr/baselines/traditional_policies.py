@@ -1,7 +1,10 @@
-"""Bundle BERT conversation policies and BYOB sequential composition policies."""
+"""BYOB released models with item-to-bundle policy curriculum."""
 from __future__ import annotations
+
 import collections
 import copy
+import hashlib
+import json
 import math
 import random
 
@@ -9,15 +12,17 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .traditional_models import Base, Features, category, f1, inputs, targets, transformer_encoder, words
+from .traditional_models import Base, inputs
+from .traditional_assets import MissingMethodAsset, historical_ids, read_manifest, verified_file
+from .traditional_upstream import load_byob
 
 
 def ppo_loss(log_probability, old_log_probability, advantage, clip=.2):
     ratio = (log_probability - old_log_probability).exp()
-    return -torch.minimum(ratio * advantage, ratio.clamp(1-clip, 1+clip) * advantage).mean()
+    return -torch.minimum(ratio * advantage, ratio.clamp(1 - clip, 1 + clip) * advantage).mean()
 
 
-def discounted_returns(rewards, gamma):
+def discounted_returns(rewards, gamma=1.):
     total, output = 0., []
     for reward in reversed(rewards):
         total = float(reward) + gamma * total
@@ -25,477 +30,307 @@ def discounted_returns(rewards, gamma):
     return list(reversed(output))
 
 
-def update_minibatches(model, records, optimizer, objective, config):
-    size, updates = int(config.get("rl_batch_size", 128)), int(config.get("ppo_updates", 2))
-    if size < 1 or updates < 1:
-        raise ValueError("rl_batch_size and ppo_updates must be positive")
-    losses = []
-    for _ in range(updates):
-        for start in range(0, len(records), size):
-            loss = torch.stack([objective(record) for record in records[start:start+size]]).mean()
-            if not torch.isfinite(loss):
-                raise FloatingPointError("Nonfinite PPO objective")
-            optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], 1.)
-            optimizer.step()
-            losses.append(float(loss.detach()))
-    return losses
-
-
-def head(dim, out):
-    return nn.Sequential(nn.Linear(dim, 2*dim), nn.ReLU(), nn.Linear(2*dim, out))
-
-
-class BUNTNetwork(nn.Module):
-    def __init__(self, features, catalog, config):
-        super().__init__()
-        self.features = features
-        dim, heads = features.dim, int(config.get("heads", 4))
-        layers, dropout = int(config.get("layers", 2)), float(config.get("dropout", .1))
-        self.low = transformer_encoder(dim, heads, 1, dropout)
-        self.high = transformer_encoder(dim, heads, layers, dropout)
-        self.decoder = nn.ModuleList([nn.TransformerDecoderLayer(dim, heads, 4*dim, dropout, batch_first=True) for _ in range(layers)])
-        self.norms = nn.ModuleList([nn.LayerNorm(dim) for _ in range(layers)])
-        frequencies = collections.Counter(token for row in catalog for token in set(words(row.get("title", ""))) if len(token) > 2)
-        self.attributes = [token for token, _ in sorted(frequencies.items(), key=lambda x: (-x[1], x[0]))[:int(config.get("max_attributes", 128))]] or ["unknown"]
-        self.attribute_ids = {x: i for i, x in enumerate(self.attributes)}
-        target_attributes = torch.zeros(len(catalog), len(self.attributes))
-        for i, row in enumerate(catalog):
-            for token in words(row.get("title", "")):
-                if token in self.attribute_ids:
-                    target_attributes[i, self.attribute_ids[token]] = 1
-        self.register_buffer("attribute_targets", target_attributes)
-        self.register_buffer("attribute_weights", len(catalog) / (len(self.attributes) * target_attributes.sum(0).clamp_min(1)))
-        self.category_state = nn.Embedding(len(features.categories), dim)
-        self.attribute_state = nn.Embedding(len(self.attributes), dim)
-        self.results = nn.Embedding(6, dim)
-        self.actors = nn.ModuleDict({"item": head(dim, features.n), "category": head(dim, len(features.categories)),
-                                    "attribute": head(dim, len(self.attributes))})
-        self.manager_context = head(dim, 2)
-        self.manager_history = head(dim, 2)
-        self.manager_gate = nn.Linear(2*dim, 1)
-        self.values = nn.ModuleDict({name: nn.Linear(dim if name != "manager" else 2*dim, 1)
-                                     for name in ("item", "category", "attribute", "manager")})
-
-    def memory(self, context):
-        history = inputs(context).get("history", [])
-        groups = collections.defaultdict(list)
-        for position, row in enumerate(history):
-            item = row.get("item_id") if isinstance(row, dict) else row
-            if item in self.features.ids:
-                key = str(row.get("bundle_id", position)) if isinstance(row, dict) else str(position)
-                groups[key].append(self.features.ids[item])
-        representations = [self.features.context(context)[:, :1]]
-        for group in list(groups.values())[-100:]:
-            values = self.features.embed(torch.tensor(group, device=self.features.text.device))[None]
-            representations.append(self.low(values).mean(1, keepdim=True))
-        return self.high(torch.cat(representations, 1))
-
-    def state(self, context, slots, categories, attributes):
-        memory = self.memory(context)
-        ids = torch.tensor(slots, device=memory.device)
-        values = self.features.embed(ids)[None]
-        extra = torch.zeros_like(values)
-        for i in range(len(slots)):
-            if categories[i]:
-                extra[0, i] += self.category_state(torch.tensor(categories[i], device=memory.device)).mean(0)
-            if attributes[i]:
-                extra[0, i] += self.attribute_state(torch.tensor(attributes[i], device=memory.device)).mean(0)
-        for layer, norm in zip(self.decoder, self.norms):
-            values = layer(norm(values + extra), memory)
-        return values[0]
-
-    def manager_features(self, state, history):
-        codes = torch.tensor(history or [0], device=state.device)
-        return torch.cat((state.mean(0), self.results(codes).mean(0)), -1)
-
-    def policy(self, name, features):
-        if name != "manager":
-            return self.actors[name](features)
-        context, history = features.chunk(2, -1)
-        gate = self.manager_gate(features).sigmoid()
-        probability = (1-gate) * self.manager_context(context).softmax(-1) + gate * self.manager_history(history).softmax(-1)
-        return probability.clamp_min(1e-12).log()
-
-
-class BUNT(Base):
-    name = "bunt"
-
-    def fit(self, train, validation, catalog):
-        self.setup(train, validation, catalog)
-        self.max_rounds = int(self.config.get("max_rounds", 20))
-        if not 1 <= self.max_rounds <= 20:
-            raise ValueError("BUNT max_rounds must be between one and twenty")
-        self.model = BUNTNetwork(self.features, catalog, self.config).to(self.device)
-        if self.restore_fit():
-            return self
-        self.train_stage(train, validation, self.objective, int(self.config.get("epochs", 100)), "bundle_cloze_pretraining")
-        self.online_fit(train, validation)
-        return self.finish()
-
-    def objective(self, row, rng):
-        gold = self.ids(row)
-        mask = self.features.n + 1
-        slots = list(gold)
-        chosen = rng.sample(range(len(gold)), rng.randint(1, len(gold)))
-        categories, attributes = [[] for _ in gold], [[] for _ in gold]
-        for i, item in enumerate(gold):
-            if rng.random() >= float(self.config.get("attribute_mask_probability", .5)):
-                categories[i] = [int(self.features.category_ids[item])]
-                attributes[i] = self.model.attribute_targets[item].nonzero().flatten().tolist()
-        for i in chosen:
-            slots[i] = mask
-        state = self.model.state(self.row_context(row), slots, categories, attributes)[chosen]
-        item_logits = self.model.policy("item", state)
-        category_logits = self.model.policy("category", state)
-        attr_logits = self.model.policy("attribute", state)
-        target = torch.tensor([gold[i] for i in chosen], device=self.device)
-        item_loss = F.cross_entropy(item_logits, target)
-        category_loss = F.cross_entropy(category_logits, self.features.category_ids[target])
-        attr_loss = -(self.model.attribute_targets[target] * self.model.attribute_weights * attr_logits.log_softmax(-1)).sum(-1).mean()
-        item_hit = item_logits.detach().argmax(-1) == target
-        category_hit = category_logits.detach().argmax(-1) == self.features.category_ids[target]
-        valid = item_hit | category_hit
-        manager_loss = state.sum() * 0
-        if valid.any():
-            manager_loss = F.cross_entropy(self.model.manager_context(state[valid]), item_hit[valid].long())
-        return item_loss + float(self.config.get("ask_loss_weight", 1.)) * (category_loss + attr_loss + manager_loss)
-
-    def policy_record(self, name, feature, allowed, rng):
-        scores = self.model.policy(name, feature)
-        mask = torch.zeros_like(scores, dtype=torch.bool)
-        mask[allowed] = True
-        probability = scores.masked_fill(~mask, -torch.inf).softmax(-1)
-        action = rng.choices(range(len(scores)), weights=probability.detach().cpu().tolist())[0]
-        return {"name": name, "feature": feature.detach(), "allowed": allowed, "action": action,
-                "old_log_probability": probability[action].detach().log(),
-                "old_value": float(self.model.values[name](feature).detach().squeeze()), "reward": 0.}
-
-    def train_episode(self, row, rng):
-        gold = self.ids(row)
-        k = min(int(self.config.get("training_slots", 3)), len(self.catalog))
-        slots = [self.features.n + 1] * k
-        categories, attributes = [[] for _ in slots], [[] for _ in slots]
-        item_pool = [set(range(len(self.catalog))) for _ in slots]
-        category_pool = [set(range(len(self.features.categories))) for _ in slots]
-        records, managers, accepted, history = [], [], set(), []
-        with torch.no_grad():
-            for turn in range(self.max_rounds):
-                state = self.model.state(self.row_context(row), slots, categories, attributes)
-                manager = self.policy_record("manager", self.model.manager_features(state, history), [0, 1], rng)
-                managers.append(manager)
-                successes = 0
-                for position in range(k):
-                    if slots[position] < self.features.n:
-                        continue
-                    name = "item" if manager["action"] else "category"
-                    pool = item_pool[position] if name == "item" else category_pool[position]
-                    allowed = sorted(pool - accepted) if name == "item" else sorted(pool)
-                    if not allowed:
-                        continue
-                    record = self.policy_record(name, state[position], allowed, rng)
-                    action = record["action"]
-                    if name == "item":
-                        success = action in gold
-                        for pool_ in item_pool:
-                            pool_.discard(action)
-                        if success:
-                            accepted.add(action)
-                            slots[position] = action
-                    else:
-                        success = any(int(self.features.category_ids[item]) == action for item in gold if item not in accepted)
-                        category_pool[position].discard(action)
-                        if success:
-                            categories[position].append(action)
-                    record["reward"] = float(success)
-                    records.append(record)
-                    successes += int(success)
-                history.append((1 if successes else 2) if manager["action"] else (3 if successes else 4))
-                if len(accepted) >= min(k, len(gold)):
-                    break
-        terminal = f1(list(accepted), gold)
-        for record, reward in zip(managers, discounted_returns([0.] * (len(managers)-1) + [terminal], float(self.config.get("gamma", .99)))):
-            record["reward"] = reward
-        return records + managers, terminal
-
-    def online_fit(self, train, validation):
-        epochs = int(self.config.get("online_epochs", 10))
-        if epochs < 1:
-            return
-        for parameter in self.model.parameters():
-            parameter.requires_grad_(False)
-        for module in (self.model.actors, self.model.manager_context, self.model.manager_history, self.model.manager_gate, self.model.values):
-            for parameter in module.parameters():
-                parameter.requires_grad_(True)
-        optimizer = torch.optim.Adam([p for p in self.model.parameters() if p.requires_grad], lr=float(self.config.get("rl_learning_rate", 3e-4)))
-        best, selected, stale = -math.inf, None, 0
-        for epoch in range(epochs):
-            self.model.eval()
-            rewards, losses = [], []
-            rollout_batch = int(self.config.get("batch_size", 16))
-            for start in range(0, len(train), rollout_batch):
-                records = []
-                for row in train[start:start+rollout_batch]:
-                    episode, reward = self.train_episode(row, self.rng)
-                    records.extend(episode)
-                    rewards.append(reward)
-                losses.extend(self.update_records(records, optimizer))
-            check = []
-            for i, row in enumerate(validation):
-                _, reward = self.train_episode(row, random.Random(self.seed + i))
-                check.append(reward)
-            score = sum(check or rewards)/len(check or rewards)
-            self.training_history.append({"stage": "conversation_ppo", "epoch": epoch+1, "train_loss": sum(losses)/len(losses), "validation_reward": score if check else None})
-            if score > best:
-                best, selected, stale = score, copy.deepcopy(self.model.state_dict()), 0
-            else:
-                stale += 1
-                if validation and stale >= int(self.config.get("patience", 10)):
-                    break
-        self.model.load_state_dict(selected)
-
-    def update_records(self, records, optimizer):
-        def objective(record):
-            feature, name = record["feature"], record["name"]
-            scores = self.model.policy(name, feature)
-            invalid = torch.ones_like(scores, dtype=torch.bool)
-            invalid[record["allowed"]] = False
-            log_probability = scores.masked_fill(invalid, -torch.inf).log_softmax(-1)[record["action"]]
-            value = self.model.values[name](feature).squeeze(-1)
-            advantage = value.new_tensor(record["reward"] - record["old_value"])
-            return ppo_loss(log_probability, record["old_log_probability"], advantage, float(self.config.get("ppo_clip", .2))) + .5 * (value - record["reward"]).square()
-        return update_minibatches(self.model, records, optimizer, objective, self.config)
-
-    @torch.no_grad()
-    def fill(self, context, slots, categories, attributes, excluded=None):
-        selected = [item for item in slots if item < self.features.n]
-        output = list(slots)
-        for position, item in enumerate(slots):
-            if item < self.features.n:
-                continue
-            state = self.model.state(context, output, categories, attributes)
-            scores = self.model.policy("item", state[position]).clone()
-            blocked = set(selected) | set(excluded or [])
-            if len(blocked) >= len(self.catalog):
-                break
-            scores[list(blocked)] = -torch.inf
-            output[position] = int(scores.argmax())
-            selected.append(output[position])
-        return [item for item in output if item < self.features.n]
-
-    @torch.no_grad()
-    def predict(self, context, k, seed):
-        self.validate_predict(context, k)
-        data = inputs(context)
-        provider = context.get("feedback_provider", data.get("feedback_provider"))
-        feedback = context.get("feedback", data.get("feedback", []))
-        slots = [self.features.n + 1] * k
-        categories, attributes = [[] for _ in slots], [[] for _ in slots]
-        history, transcript, rejected, asked = [], [], set(), set()
-        if provider is None and not feedback:
-            return self.result(self.fill(context, slots, categories, attributes), conversation_turns=0,
-                               feedback_mode="one_shot_no_respondent", max_rounds=self.max_rounds)
-        for turn in range(self.max_rounds):
-            state = self.model.state(context, slots, categories, attributes)
-            action = int(self.model.policy("manager", self.model.manager_features(state, history)).argmax())
-            open_positions = [i for i, item in enumerate(slots) if item >= self.features.n]
-            if not open_positions:
-                break
-            if action == 1:
-                proposal = self.fill(context, slots, categories, attributes, rejected)
-                proposed_new = [i for i in proposal if i not in slots]
-                request = {"turn": turn+1, "action": "recommend", "items": [self.item_ids[i] for i in proposed_new]}
-            else:
-                logits = self.model.policy("category", state[open_positions].mean(0)).clone()
-                if len(asked) >= len(self.features.categories):
-                    break
-                logits[list(asked)] = -torch.inf
-                choice = int(logits.argmax())
-                asked.add(choice)
-                request = {"turn": turn+1, "action": "ask", "category": self.features.categories[choice]}
-            response = provider(request) if provider is not None else (feedback[turn] if turn < len(feedback) else None)
-            if response is None:
-                break
-            if not isinstance(response, dict):
-                raise ValueError("Feedback must be a dictionary or None")
-            if action == 1:
-                accepted_ids = response.get("accepted_items", [])
-                rejected_ids = response.get("rejected_items", [])
-                if not set(accepted_ids + rejected_ids) <= set(request["items"]):
-                    raise ValueError("Item feedback must refer only to proposed items")
-                if len(set(accepted_ids)) != len(accepted_ids):
-                    raise ValueError("Accepted item feedback cannot contain duplicates")
-                if set(accepted_ids) & set(rejected_ids):
-                    raise ValueError("Feedback cannot accept and reject the same item")
-                for position, item_id in zip(open_positions, accepted_ids):
-                    slots[position] = self.index[item_id]
-                rejected.update(self.index[i] for i in rejected_ids)
-                success = bool(accepted_ids)
-                history.append(1 if success else 2)
-            else:
-                success = bool(response.get("accepted", False))
-                if success:
-                    for position in open_positions:
-                        categories[position].append(choice)
-                elif response.get("rejected", False):
-                    rejected.update(i for i, cat in enumerate(self.features.category_ids.tolist()) if cat == choice)
-                history.append(3 if success else 4)
-            transcript.append({"request": request, "response": response})
-        selected = self.fill(context, slots, categories, attributes, rejected)
-        return self.result(selected, conversation_turns=len(transcript), feedback_mode="external", transcript=transcript, max_rounds=self.max_rounds)
-
-
-class BYOBNetwork(nn.Module):
-    def __init__(self, features, config):
-        super().__init__()
-        self.features = features
-        dim = features.dim
-        self.preference_query = nn.Linear(dim, dim)
-        self.compatibility = nn.Linear(dim, dim, bias=False)
-        self.query = nn.Linear(3*dim, dim)
-        self.reference = nn.Linear(dim, dim)
-        self.pointer = nn.Linear(dim, 1, bias=False)
-        self.value = nn.Linear(3*dim, 1)
-        self.clip = float(config.get("pointer_clip", 10.))
-
-    def state(self, context, prefix):
-        memory = self.features.context(context)[0]
-        query = memory[0]
-        history = memory[1:].mean(0) if len(memory) > 1 else torch.zeros_like(query)
-        bundle = self.features.all_items()[prefix].mean(0) if prefix else torch.zeros_like(query)
-        return torch.cat((query, history, bundle), -1)
-
-    def logits(self, state):
-        logits = self.pointer(torch.tanh(self.query(state)[None] + self.reference(self.features.all_items()))).squeeze(-1)
-        return self.clip * torch.tanh(logits)
-
-    def preference(self, context):
-        user = self.preference_query(self.features.context(context).mean(1)[0])
-        return self.features.all_items() @ user / math.sqrt(self.features.dim)
-
-    def compatibility_scores(self, item, previous):
-        values = self.features.all_items()
-        return (self.compatibility(values[item])[None] * values[previous]).sum(-1) / math.sqrt(self.features.dim)
+def bundle_metric(prediction, gold, metric, *, allow_variable_targets=False):
+    if not gold or (len(prediction) != len(gold) and not allow_variable_targets):
+        raise ValueError("BYOB native bundle metrics require equal target and generated sizes")
+    common = set(prediction) & set(gold)
+    if metric == "recall":
+        return len(common) / len(gold)
+    if metric == "precision":
+        return float(prediction[0] in common)
+    if metric == "precision_plus":
+        return float(bool(common))
+    raise ValueError("Unknown BYOB bundle metric")
 
 
 class BYOB(Base):
     name = "byob"
 
+    def build_features(self, catalog):
+        return None
+
+    def load_assets(self, train, catalog):
+        path, manifest = read_manifest(self.config, "byob_assets_path")
+        train_ids = {row["session_id"] for row in train}
+        if set(manifest.get("training_session_ids", [])) != train_ids:
+            raise ValueError("BYOB asset training session identities differ from fit inputs")
+        self.asset_hashes = {"manifest": hashlib.sha256(path.read_bytes()).hexdigest()}
+        self.assets = {}
+        for key in ("item_interactions", "click_sequences", "candidate_pools"):
+            entry = manifest.get(key, {})
+            if not entry.get("provenance"):
+                raise MissingMethodAsset("BYOB requires documented " + key)
+            if key == "candidate_pools":
+                if entry.get("target_independent") is not True:
+                    raise ValueError("Prediction candidate pools must be built independently of held-out targets")
+            elif entry.get("training_scope") != "training_only":
+                raise ValueError("BYOB reward assets must be training_only")
+            file = verified_file(path, entry)
+            self.assets[key] = json.loads(file.read_text())
+            self.asset_hashes[key] = entry["sha256"]
+        for key in ("item_interactions", "click_sequences"):
+            if not self.assets[key] or any(row.get("session_id") not in train_ids for row in self.assets[key]):
+                raise ValueError("Reward training assets contain missing or non-training session identities")
+        self.candidate_pools = self.assets["candidate_pools"]
+        if not isinstance(self.candidate_pools, dict):
+            raise ValueError("candidate_pools must map session IDs to item-ID lists")
+
     def fit(self, train, validation, catalog):
+        self.load_assets(train, catalog)
+        definitions, source = load_byob(self.config)
+        self.asset_hashes.update(source)
         self.setup(train, validation, catalog)
-        self.epsilon = float(self.config.get("epsilon", .2))
-        if not 0 <= self.epsilon < 1:
-            raise ValueError("epsilon must be in [0,1)")
-        self.model = BYOBNetwork(self.features, self.config).to(self.device)
+        self.users = {user: index + 1 for index, user in enumerate(sorted({str(row["user_id"]) for row in train if row.get("user_id") is not None}))}
+        if not self.users:
+            raise MissingMethodAsset("BYOB requires persistent user_id values, not session or intent embeddings")
+        self.bundle_size = int(self.config.get("training_bundle_size", 3))
+        self.pool_size = int(self.config.get("pool_size", 20))
+        self.training_rows = train
+        self.evaluation_protocol = self.config.get("evaluation_protocol", "native")
+        if self.evaluation_protocol not in {"native", "rabr_fixed_k"}:
+            raise ValueError("Unknown BYOB evaluation protocol")
+        self.exploration_rate = float(self.config.get("exploration_rate", 0.))
+        if not 0 <= self.exploration_rate < 1:
+            raise ValueError("BYOB exploration_rate must lie in [0,1)")
+        if self.evaluation_protocol == "native" and self.exploration_rate:
+            raise ValueError("Exploration-rate mixing requires the explicit rabr_fixed_k adapter")
+        if not 1 <= self.bundle_size <= self.pool_size <= len(catalog):
+            raise ValueError("BYOB requires 1 <= bundle size <= pool size <= catalog size")
+        for row in list(train) + list(validation):
+            self.observation(self.row_context(row), [], self.training_pool(row, random.Random(self.seed)) if row in train else self.pool(self.row_context(row)))
+            if self.evaluation_protocol == "native" and len(self.ids(row)) != self.bundle_size:
+                raise MissingMethodAsset("BYOB's native profile requires fixed-size training/validation bundles")
+        conf = {"n_user": len(self.users) + 1, "n_item": len(catalog) + 1, "vocab_size": len(catalog) + 1,
+                "bundle_size": self.bundle_size, "embed_dim": int(self.config.get("embed_dim", 32)),
+                "hidden_dim": int(self.config.get("pointer_hidden_dim", 128)), "num_heads": 2, "num_layers": 1,
+                "dropout": float(self.config.get("dropout", .1)), "encoder": bool(self.config.get("pool_transformer", False)),
+                "concat": bool(self.config.get("concat_bundle", False)), "clip": 10}
+        preference = definitions["ItemNCFModel"]({**conf, "hidden_dim": 128})
+        compatibility = definitions["SkipGramModel"]({**conf, "hidden_dim": 64})
+        self.model = nn.ModuleDict({"policy": definitions["ItemPointer"](conf), "value": nn.Linear(3 * conf["embed_dim"], 1),
+                                    "preference": preference, "compatibility": compatibility}).to(self.device)
         if self.restore_fit():
             return self
-        self.train_stage(train, validation, self.reward_objective, int(self.config.get("reward_epochs", 10)), "item_preference_compatibility")
-        for parameter in self.model.parameters():
-            parameter.requires_grad_(False)
-        for module in (self.model.query, self.model.reference, self.model.pointer, self.model.value):
-            for parameter in module.parameters():
-                parameter.requires_grad_(True)
-        self.train_policy(train, validation)
+        self.train_rewards()
+        self.model["preference"].requires_grad_(False)
+        self.model["compatibility"].requires_grad_(False)
+        self.train_policy(train, validation, "item", int(self.config.get("item_policy_epochs", 50)))
+        self.train_policy(train, validation, "bundle", int(self.config.get("bundle_policy_epochs", 50)))
         return self.finish()
 
-    def reward_objective(self, row, rng):
-        gold = self.ids(row)
-        negative = [i for i in range(len(self.catalog)) if i not in gold]
-        positive = rng.choice(gold)
-        candidates = [positive] + ([rng.choice(negative)] if negative else [])
-        labels = torch.tensor([1.] + ([0.] if negative else []), device=self.device)
-        preference = F.binary_cross_entropy_with_logits(self.model.preference(self.row_context(row))[candidates], labels)
-        compatible = [i for i in gold if i != positive]
-        if not compatible:
-            return preference
-        previous = [rng.choice(compatible)] + ([rng.choice(negative)] if negative else [])
-        return preference + F.binary_cross_entropy_with_logits(self.model.compatibility_scores(positive, previous), labels)
+    def user(self, context):
+        user = context.get("user_id")
+        if user is None or str(user) not in self.users:
+            raise MissingMethodAsset("BYOB needs a persistent user present in the reward/policy training data")
+        return self.users[str(user)]
+
+    def metric(self, prediction, gold):
+        return bundle_metric(prediction, gold, self.config.get("bundle_metric", "recall"),
+                             allow_variable_targets=self.evaluation_protocol == "rabr_fixed_k")
+
+    def pool(self, context):
+        items = self.candidate_pools.get(context.get("session_id"))
+        if not isinstance(items, list) or len(items) != self.pool_size or len(set(items)) != len(items) or not set(items) <= self.index.keys():
+            raise MissingMethodAsset("BYOB requires a distinct, target-independent candidate pool of declared pool_size for this session")
+        return [self.index[item] + 1 for item in items]
+
+    def training_pool(self, row, rng):
+        positive = [item + 1 for item in self.ids(row)]
+        if len(positive) > self.pool_size:
+            raise MissingMethodAsset("BYOB training target exceeds the declared candidate pool size")
+        excluded = {item for example in getattr(self, "training_rows", [row]) if example.get("user_id") == row.get("user_id") for item in self.ids(example)}
+        negative = [item + 1 for item in range(len(self.catalog)) if item not in excluded]
+        if len(negative) < self.pool_size - len(positive):
+            raise MissingMethodAsset("BYOB training needs enough unpurchased candidate negatives")
+        pool = positive + rng.sample(negative, self.pool_size - len(positive))
+        rng.shuffle(pool)
+        return pool
+
+    def observation(self, context, prefix, pool):
+        inputs(context)
+        length = int(self.config.get("sequence_length", 20))
+        history = [index + 1 for index in historical_ids(context, self.index, maximum=length, minimum=length)]
+        return {"user": self.user(context), "history": history, "pool": [item if item not in prefix else 0 for item in pool],
+                "bundle": list(prefix) + [0] * (self.bundle_size - len(prefix))}
+
+    def compatibility(self, actions, previous):
+        model = self.model["compatibility"]
+        left = model.inp_embed(torch.as_tensor(actions, device=self.device))
+        if model.hidden_dim:
+            left = F.relu(model.fc1(left))
+            left = F.relu(model.fc2(left))
+        right = model.out_embed(torch.as_tensor(previous, device=self.device))
+        return (left * right).sum(-1).sigmoid()
+
+    def policy(self, observation):
+        tensors = [torch.tensor([[observation["user"]]], device=self.device),
+                   torch.tensor([observation["history"]], device=self.device),
+                   torch.tensor([observation["pool"]], device=self.device),
+                   torch.tensor([observation["bundle"]], device=self.device)]
+        for index in (1, 2, 3):
+            if tensors[index].shape[1] == 1:
+                tensors[index] = tensors[index].unsqueeze(1)
+        logits, state = self.model["policy"](tensors)
+        allowed = torch.tensor(observation["pool"], device=self.device) > 0
+        previous = [item for item in observation["bundle"] if item]
+        threshold = float(self.config.get("neighbor_threshold", 0))
+        if previous and threshold:
+            with torch.no_grad():
+                allowed &= self.compatibility(observation["pool"], [previous[-1]] * len(observation["pool"])) >= threshold
+        if not allowed.any():
+            raise ValueError("BYOB neighbor constraint leaves no feasible action")
+        probability = logits[0].masked_fill(~allowed, -torch.inf).softmax(-1)
+        rate = self.exploration_rate
+        probability = (1 - rate) * probability + rate * allowed.to(probability.dtype) / allowed.sum()
+        return probability, self.model["value"](state)[0, 0]
+
+    def train_rewards(self):
+        records = self.assets["item_interactions"]
+        training_users = {row["session_id"]: str(row["user_id"]) for row in self.training_rows}
+        for row in records:
+            if str(row.get("user_id")) not in self.users or row.get("item_id") not in self.index or row.get("label") not in (0, 1):
+                raise ValueError("Invalid BYOB item interaction")
+            if str(row["user_id"]) != training_users[row["session_id"]]:
+                raise ValueError("Item interaction user differs from its training session")
+        if {row["label"] for row in records} != {0, 1}:
+            raise MissingMethodAsset("BYOB preference fitting requires positive and negative training feedback")
+        preference = self.model["preference"]
+        optimizer = torch.optim.Adam(preference.parameters(), lr=float(self.config.get("reward_learning_rate", .001)))
+        size = int(self.config.get("reward_batch_size", 256))
+        if size < 2 or int(self.config.get("reward_epochs", 10)) < 1:
+            raise ValueError("BYOB reward fitting requires batch size >= 2 and positive epochs")
+        for epoch in range(int(self.config.get("reward_epochs", 10))):
+            self.rng.shuffle(records)
+            losses = []
+            for start in range(0, len(records), size):
+                batch = records[start:start + size]
+                user = torch.tensor([[self.users[str(row["user_id"])]] for row in batch], device=self.device)
+                item = torch.tensor([[self.index[row["item_id"]] + 1] for row in batch], device=self.device)
+                label = torch.tensor([[float(row["label"])] for row in batch], device=self.device)
+                loss = F.binary_cross_entropy(preference((user, item, None)), label)
+                optimizer.zero_grad(); loss.backward(); optimizer.step()
+                losses.append(float(loss.detach()))
+            self.training_history.append({"stage": "released_ItemNCF_BCE", "epoch": epoch + 1, "train_loss": sum(losses) / len(losses)})
+        sequences = []
+        for row in self.assets["click_sequences"]:
+            if not set(row.get("items", [])) <= self.index.keys():
+                raise ValueError("Unknown item in BYOB click sequence")
+            sequences.append([self.index[item] + 1 for item in row["items"]])
+        counts = collections.Counter(item for sequence in sequences for item in sequence)
+        population, probabilities = list(counts), [counts[item] ** .75 for item in counts]
+        window = int(self.config.get("context_window", 5))
+        if window < 1:
+            raise ValueError("BYOB SGNS context window must be positive")
+        pairs = [(sequence[i], sequence[j]) for sequence in sequences for i in range(window, len(sequence) - window)
+                 for j in range(max(i - window, 0), min(i + window, len(sequence))) if j != i]
+        if len(pairs) < 2:
+            raise MissingMethodAsset("BYOB SGNS requires actual training click sequences longer than twice its context window")
+        model = self.model["compatibility"]
+        optimizer = torch.optim.SGD(model.parameters(), lr=float(self.config.get("compatibility_learning_rate", .001)))
+        negatives = int(self.config.get("compatibility_negatives", 15))
+        if negatives < 2:
+            raise ValueError("The released SkipGram forward requires at least two negative samples")
+        for epoch in range(int(self.config.get("reward_epochs", 10))):
+            self.rng.shuffle(pairs)
+            losses = []
+            batches = [pairs[start:start + size] for start in range(0, len(pairs), size)]
+            if len(batches[-1]) == 1:
+                batches[-2].extend(batches.pop())
+            for batch in batches:
+                left = torch.tensor([[item] for item, _ in batch], device=self.device)
+                right = torch.tensor([[item] for _, item in batch], device=self.device)
+                negative = torch.tensor([self.rng.choices(population, weights=probabilities, k=negatives) for _ in batch], device=self.device)
+                loss = model((left, right, negative))
+                optimizer.zero_grad(); loss.backward(); optimizer.step()
+                losses.append(float(loss.detach()))
+            self.training_history.append({"stage": "released_SkipGram_SGNS", "epoch": epoch + 1, "train_loss": sum(losses) / len(losses)})
 
     @torch.no_grad()
     def reward_terms(self, context, prefix, action, gold, final):
-        preference = float(self.model.preference(context)[action].sigmoid())
-        compatibility = float(self.model.compatibility_scores(action, prefix).sigmoid().sum()) if prefix else 0.
-        terminal = f1(prefix + [action], gold) if final else 0.
+        user = torch.tensor([[self.user(context)]], device=self.device)
+        item = torch.tensor([[action]], device=self.device)
+        preference = float(self.model["preference"]((user, item, None))[0, 0])
+        compatibility = float(self.compatibility([action] * len(prefix), prefix).sum()) if prefix else 0.
+        terminal = self.metric(prefix + [action], gold) if final else 0.
         return {"item_preference": preference, "item_compatibility": compatibility, "bundle_metric": terminal}
 
-    def probabilities(self, state, prefix):
-        logits = self.model.logits(state)
-        allowed = torch.ones(len(self.catalog), device=self.device, dtype=torch.bool)
-        allowed[prefix] = False
-        probability = logits.masked_fill(~allowed, -torch.inf).softmax(-1)
-        return (1-self.epsilon) * probability + self.epsilon * allowed.float() / allowed.sum()
-
     @torch.no_grad()
-    def rollout(self, row, rng):
-        gold = self.ids(row)
-        k = min(int(self.config.get("training_bundle_size", 3)), len(self.catalog))
-        prefix, records, rewards = [], [], []
+    def rollout(self, row, rng, stage):
         context = self.row_context(row)
-        weights = self.config.get("reward_weights", [1., 1., 1.])
-        if len(weights) != 3:
-            raise ValueError("BYOB requires three reward weights")
-        for step in range(k):
-            state = self.model.state(context, prefix)
-            probability = self.probabilities(state, prefix)
-            action = rng.choices(range(len(self.catalog)), weights=probability.cpu().tolist())[0]
-            terms = self.reward_terms(context, prefix, action, gold, step == k-1)
-            reward = sum(float(w) * value for w, value in zip(weights, terms.values()))
-            records.append({"state": state.detach(), "prefix": list(prefix), "action": action,
-                            "old_log_probability": probability[action].log().detach(), "reward_terms": terms,
-                            "old_value": float(self.model.value(state).squeeze())})
-            rewards.append(reward)
+        pool = self.training_pool(row, rng)
+        gold = [index + 1 for index in self.ids(row)]
+        prefix, records, rewards = [], [], []
+        for step in range(self.bundle_size):
+            observation = self.observation(context, prefix, pool)
+            probabilities, value = self.policy(observation)
+            choice = rng.choices(range(len(pool)), weights=probabilities.cpu().tolist())[0]
+            action = pool[choice]
+            terms = self.reward_terms(context, prefix, action, gold, step + 1 == self.bundle_size)
+            rewards.append(terms["item_preference"] + terms["item_compatibility"] if stage == "item" else terms["bundle_metric"])
+            records.append({"observation": observation, "action": choice, "old_log_probability": float(probabilities[choice].log()), "old_value": float(value), "terms": terms})
             prefix.append(action)
-        returns = discounted_returns(rewards, float(self.config.get("gamma", .99)))
+        returns = discounted_returns(rewards, 1.)
         for record, value in zip(records, returns):
             record["return"] = value
-        return records, f1(prefix, gold)
+            record["advantage"] = value - record["old_value"]
+        return records
 
-    def train_policy(self, train, validation):
-        optimizer = torch.optim.Adam([p for p in self.model.parameters() if p.requires_grad], lr=float(self.config.get("rl_learning_rate", 3e-4)))
-        best, selected, stale = -math.inf, None, 0
+    def train_policy(self, train, validation, stage, epochs):
+        if epochs < 1:
+            raise ValueError("Both BYOB curriculum stages require positive epochs")
+        self.training_rows = train
+        if int(self.config.get("ppo_updates", 4)) < 1 or int(self.config.get("rl_batch_size", 128)) < 1:
+            raise ValueError("BYOB PPO budgets must be positive")
+        parameters = list(self.model["policy"].parameters()) + list(self.model["value"].parameters())
+        optimizer = torch.optim.Adam(parameters, lr=float(self.config.get("rl_learning_rate", .0003)))
+        best, stale, selected = -math.inf, 0, None
         self.model.eval()
-        for epoch in range(int(self.config.get("epochs", 100))):
-            rewards, losses = [], []
-            rollout_batch = int(self.config.get("batch_size", 16))
-            for start in range(0, len(train), rollout_batch):
-                records = []
-                for row in train[start:start+rollout_batch]:
-                    episode, reward = self.rollout(row, self.rng)
-                    records.extend(episode)
-                    rewards.append(reward)
-                losses.extend(self.update_records(records, optimizer))
+        for epoch in range(epochs):
+            losses = []
+            for start in range(0, len(train), int(self.config.get("batch_size", 16))):
+                records = [record for row in train[start:start + int(self.config.get("batch_size", 16))] for record in self.rollout(row, self.rng, stage)]
+                for _ in range(int(self.config.get("ppo_updates", 4))):
+                    self.rng.shuffle(records)
+                    size = int(self.config.get("rl_batch_size", 128))
+                    for offset in range(0, len(records), size):
+                        objectives = []
+                        for record in records[offset:offset + size]:
+                            probability, value = self.policy(record["observation"])
+                            policy_loss = ppo_loss(probability[record["action"]].log(), value.new_tensor(record["old_log_probability"]), value.new_tensor(record["advantage"]), float(self.config.get("ppo_clip", .2)))
+                            objectives.append(policy_loss + .5 * (value - record["return"]).square())
+                        loss = torch.stack(objectives).mean()
+                        if not torch.isfinite(loss):
+                            raise FloatingPointError("Nonfinite BYOB policy objective")
+                        optimizer.zero_grad(); loss.backward()
+                        nn.utils.clip_grad_norm_(parameters, 1.)
+                        optimizer.step()
+                        losses.append(float(loss.detach()))
             with torch.no_grad():
-                check = [f1(self.greedy(self.row_context(row), min(int(self.config.get("training_bundle_size", 3)), len(self.catalog))), self.ids(row)) for row in validation]
-            score = sum(check or rewards)/len(check or rewards)
-            self.training_history.append({"stage": "composition_ppo", "epoch": epoch+1, "train_loss": sum(losses)/len(losses), "validation_f1": score if check else None})
+                scores = [self.metric(self.greedy(self.row_context(row)), [i + 1 for i in self.ids(row)]) for row in validation]
+            score = sum(scores) / len(scores)
+            self.training_history.append({"stage": stage + "_reward_PPO", "epoch": epoch + 1, "train_loss": sum(losses) / len(losses), "validation_bundle_metric": score})
             if score > best:
-                best, selected, stale = score, copy.deepcopy(self.model.state_dict()), 0
+                best, stale, selected = score, 0, copy.deepcopy(self.model.state_dict())
             else:
                 stale += 1
-                if validation and stale >= int(self.config.get("patience", 10)):
+                if stale >= int(self.config.get("patience", 10)):
                     break
         self.model.load_state_dict(selected)
 
-    def update_records(self, records, optimizer):
-        def objective(record):
-            state = record["state"]
-            probability = self.probabilities(state, record["prefix"])
-            value = self.model.value(state).squeeze(-1)
-            advantage = value.new_tensor(record["return"] - record["old_value"])
-            return ppo_loss(probability[record["action"]].log(), record["old_log_probability"], advantage, float(self.config.get("ppo_clip", .2))) + .5 * (value - record["return"]).square()
-        return update_minibatches(self.model, records, optimizer, objective, self.config)
-
     @torch.no_grad()
-    def greedy(self, context, k):
-        selected = []
-        for _ in range(k):
-            scores = self.model.logits(self.model.state(context, selected)).clone()
-            scores[selected] = -torch.inf
-            selected.append(int(scores.argmax()))
-        return selected
+    def greedy(self, context):
+        pool = self.pool(context)
+        prefix = []
+        for _ in range(self.bundle_size):
+            probability, _ = self.policy(self.observation(context, prefix, pool))
+            prefix.append(pool[int(probability.argmax())])
+        return prefix
 
     def predict(self, context, k, seed):
         self.validate_predict(context, k)
-        return self.result(self.greedy(context, k), decoding="sequential_pointer_greedy", reward_variant="B-M",
-                           reward_terms=["item_preference", "item_compatibility", "terminal_bundle_f1"], exploration_epsilon_training=self.epsilon)
+        if k != self.bundle_size:
+            raise ValueError("BYOB was trained for a fixed bundle_size; inference k must match")
+        return self.result([item - 1 for item in self.greedy(context)], decoding="released_ItemPointer", curriculum=["item_preference_plus_compatibility", "terminal_" + self.config.get("bundle_metric", "recall")], gamma=1., candidate_pool_size=self.pool_size, intent_used=False,
+                           evaluation_protocol=self.evaluation_protocol,
+                           exploration_rate=self.exploration_rate,
+                           evaluation_adaptation="fixed_action_horizon_variable_target_recall" if self.evaluation_protocol == "rabr_fixed_k" else None)

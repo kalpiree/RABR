@@ -3,7 +3,7 @@
 Modified from the DDBC/MDLM architecture; see THIRD_PARTY_NOTICES.md.
 MDLM: Copyright 2024 Cornell University, Apache License 2.0.
 Changes include SDPA attention, code-token loss normalization, and
-seed-conditioned catalog-constrained sampling.
+seed-conditioned levelwise sampling and an optional catalog-constrained adapter.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 UPSTREAM_COMMIT = "e1f4afc59121662e626ffefde79316a5e0dde044"
-MODEL_VERSION = "ddbc-minilm-seed-complete-v1"
+MODEL_VERSION = "ddbc-clhe-levelwise-v2"
 
 
 class LayerNorm(nn.Module):
@@ -408,5 +408,68 @@ def sample_bundles(model: nn.Module, catalog_codes: Tensor, seed_item_indices: T
                             "steps": steps, "temperature": temperature,
                             "constraint_policy": "existing_catalog_tuple_and_distinct_item_feasibility"}
         return result
+    finally:
+        model.train(was_training)
+
+
+@torch.no_grad()
+def sample_levelwise_codes(model, catalog_codes, seed_item_indices, bos_id, boi_id, eos_id, mask_id,
+                           *, completion_items, codebook_size, steps=25, generator=None, return_diagnostics=False):
+    if catalog_codes.ndim != 2 or catalog_codes.shape[1] != 4 or catalog_codes.dtype != torch.long:
+        raise ValueError('Expected four-level catalog codes')
+    if seed_item_indices.ndim != 2 or seed_item_indices.dtype != torch.long or not seed_item_indices.numel():
+        raise ValueError('Native DDBC requires supplied seed indices shaped [batch, seeds]')
+    if completion_items < 1 or steps < 1 or codebook_size < 2:
+        raise ValueError('Invalid completion length, steps or codebook size')
+    if (bos_id, boi_id, eos_id, mask_id) != (0, 4*codebook_size+1, 4*codebook_size+2, 4*codebook_size+3):
+        raise ValueError('Structural IDs differ from the four-level tokenizer layout')
+    device = next(model.parameters()).device
+    codes, seeds = catalog_codes.to(device), seed_item_indices.to(device)
+    if (seeds < 0).any() or (seeds >= len(codes)).any():
+        raise ValueError('Supplied seed index is outside the catalog')
+    for level in range(4):
+        if (codes[:, level] <= level*codebook_size).any() or (codes[:, level] > (level+1)*codebook_size).any():
+            raise ValueError('Catalog code violates its level range')
+    prefix, _ = serialize_item_codes(codes[seeds], bos_id, boi_id, eos_id)
+    unknown_codes = torch.full((len(seeds), completion_items, 4), mask_id, device=device, dtype=torch.long)
+    suffix, suffix_mask = serialize_item_codes(unknown_codes, bos_id, boi_id, eos_id)
+    tokens = torch.cat((prefix, suffix), dim=1)
+    mutable = torch.cat((torch.zeros_like(prefix, dtype=torch.bool), suffix_mask), dim=1)
+    original = tokens.clone()
+    cached, forward_calls = None, 0
+    was_training = model.training
+    model.eval()
+    try:
+        for iteration in range(steps):
+            t, dt = 1 - iteration / steps, 1 / steps
+            if cached is None:
+                sigma, _ = loglinear_noise(torch.full((len(seeds),), t, device=device))
+                logits = model(tokens, sigma).float()
+                if logits.shape[:2] != tokens.shape or logits.shape[-1] <= mask_id or not torch.isfinite(logits).all():
+                    raise ValueError('Invalid native diffusion logits')
+                cached = subs_log_probs(logits, tokens, mask_id)
+                forward_calls += 1
+            before = tokens.clone()
+            for level in range(4):
+                positions = torch.arange(prefix.shape[1]+2+level, tokens.shape[1]-1, 5, device=device)
+                lower, upper = level*codebook_size+1, (level+1)*codebook_size+1
+                weights = cached[:, positions, lower:upper] + math.log(dt)
+                remaining = max(0.0, t-dt) if iteration < steps-1 else 0.0
+                retain = torch.full((*weights.shape[:-1], 1), math.log(remaining) if remaining else -torch.inf, device=device)
+                weights = torch.cat((weights, retain), dim=-1).softmax(dim=-1)
+                choices = torch.multinomial(weights.reshape(-1, codebook_size+1), 1, generator=generator).reshape(len(seeds), -1)
+                values = torch.where(choices == codebook_size, mask_id, choices+lower)
+                tokens[:, positions] = torch.where(tokens[:, positions] == mask_id, values, tokens[:, positions])
+            if not torch.equal(before, tokens) or getattr(model, 'time_conditioning', False):
+                cached = None
+        if (tokens[mutable] == mask_id).any() or not torch.equal(tokens[~mutable], original[~mutable]):
+            raise RuntimeError('Native decoding failed to complete or changed supplied context')
+        generated = torch.stack([tokens[:, prefix.shape[1]+2+5*slot:prefix.shape[1]+6+5*slot]
+                                 for slot in range(completion_items)], dim=1)
+        if return_diagnostics:
+            return generated, {'steps': steps, 'denoiser_forward_calls': forward_calls,
+                               'constraint_policy': 'level_ranges_only_no_catalog_prefix_or_tuple_filter',
+                               'generated_codes': generated.cpu().tolist()}
+        return generated
     finally:
         model.train(was_training)

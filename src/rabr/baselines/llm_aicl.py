@@ -1,5 +1,7 @@
 """Neighbor demonstrations with mutual correction and supervised feedback."""
 import json
+import os
+from pathlib import Path
 import numpy as np
 from .llm_common import LLMBase, context_text, input_context, parse_items, parse_object, stable_seed
 
@@ -12,6 +14,18 @@ class AICL(LLMBase):
         super().fit(train, validation, catalog)
         if not self.train:
             raise ValueError('AICL requires training demonstrations')
+        from rabr.backend import create_backend
+        raters = self.config.get('intent_evaluator_backends', [])
+        if len(raters) != 2:
+            raise ValueError('AICL requires two distinct intent_evaluator_backends')
+        names = [os.path.expanduser(os.path.expandvars(str(r.get('model_path', r.get('model_id', ''))))) for r in raters]
+        names = [str(Path(name).resolve()) if Path(name).exists() else name for name in names]
+        if not all(names) or len(set(names)) != 2:
+            raise ValueError('AICL evaluators must identify two different models, not different seeds')
+        self.evaluators = [create_backend(r, self.config.get('evaluation_profile', 'experiment'), catalog) for r in raters]
+        self.evaluator_names = names
+        self.fit_metadata = {'intent_evaluators': names, 'rating_scale': [3, 3, 2],
+                             'task_protocol': 'query_history_adaptation', 'demonstration_labels': 'training_only'}
         self.retrieval_vectors = self.index.encode([context_text(r) for r in self.train])
         self.demonstrations = {}
         return self
@@ -55,15 +69,21 @@ class AICL(LLMBase):
         intent = self._intent(items, row, stable_seed(seed, 'final_intent'), trace)
         for step in range(int(self.config.get('intent_feedback_rounds', 1))):
             scores = []
-            for rater in range(int(self.config.get('intent_raters', 2))):
+            for rater, evaluator in enumerate(self.evaluators):
                 rater_scores=[]
                 for repeat in range(int(self.config.get('rater_repeats', 3))):
-                    prompt = [{'role': 'user', 'content': 'Rate the generated and reference intents on naturalness, product coverage, and motivation from 1 to 5. Return JSON with generated and reference arrays of three numbers.\n' + json.dumps({'generated': intent, 'reference': input_context(row)['intent'], 'products': [self.catalog[self.index.lookup[i]]['title'] for i in items]})}]
-                    value, _ = parse_object(self.ask(prompt, stable_seed(seed, 'rater', step, rater, repeat), trace, 'intent_rating'))
+                    prompt = [{'role': 'user', 'content': 'Compare the generated and reference intents. Score naturalness 1–3 (hard to easy to understand), product coverage 1–3 (few to most products), and motivation 1–2 (absent or present). Return JSON with generated and reference arrays of three numbers.\n' + json.dumps({'generated': intent, 'reference': input_context(row)['intent'], 'products': [self.catalog[self.index.lookup[i]]['title'] for i in items]})}]
+                    rating_seed = stable_seed(seed, 'rater', step, rater, repeat)
+                    rating_raw = evaluator.generate(prompt, rating_seed)
+                    trace.append({'stage': 'intent_rating', 'evaluator': self.evaluator_names[rater],
+                                  'seed': rating_seed, 'raw_output': rating_raw, 'cost': dict(evaluator.last_generation)})
+                    value, _ = parse_object(rating_raw)
                     a, b = value.get('generated'), value.get('reference')
-                    if isinstance(a, list) and isinstance(b, list) and len(a) == len(b) == 3 and all(type(x) in (int, float) and 1 <= x <= 5 for x in a + b):
+                    if isinstance(a, list) and isinstance(b, list) and len(a) == len(b) == 3 and all(type(x) in (int, float) and 1 <= x <= limit for values in (a, b) for x, limit in zip(values, (3, 3, 2))):
                         rater_scores.append(np.asarray(b) - np.asarray(a))
-                if rater_scores:scores.append(np.mean(rater_scores,axis=0))
+                if len(rater_scores) != int(self.config.get('rater_repeats', 3)):
+                    raise ValueError('AICL evaluator returned an invalid rating; cannot silently skip feedback')
+                scores.append(np.mean(rater_scores,axis=0))
             if not scores or not (np.max(scores, axis=0) > 0).any():
                 break
             aspects = [name for name, difference in zip(('naturalness', 'coverage', 'motivation'), np.max(scores, axis=0)) if difference > 0]
@@ -87,5 +107,4 @@ class AICL(LLMBase):
             demo, calls = self._demonstrate(row, stable_seed(int(self.config.get('demonstration_seed', 42)), row['session_id']))
             demonstrations.append(demo)
             trace += calls
-        raw = self.ask(self.prompt(context, k, 'Neighbor demonstrations and rules:\n' + json.dumps(demonstrations, ensure_ascii=False)), seed, trace, 'demonstration_guided_inference')
-        return self.finish(raw, k, trace, {'neighbor_session_ids': [self.train[int(i)]['session_id'] for i in neighbors], 'intent_rater_variant': 'same_backbone_independent_seeds'})
+        return self.sample_predictions(self.prompt(context, k, 'Neighbor demonstrations and rules:\n' + json.dumps(demonstrations, ensure_ascii=False)), k, seed, trace, 'demonstration_guided_inference', {'neighbor_session_ids': [self.train[int(i)]['session_id'] for i in neighbors], 'intent_evaluators': self.evaluator_names})

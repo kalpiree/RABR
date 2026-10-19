@@ -81,6 +81,29 @@ def _model_inventory(config):
     return inventory
 
 
+def _external_assets(value, prefix="algorithm"):
+    inventory = {}
+    if isinstance(value, dict):
+        for key, item in value.items():
+            name = prefix + "." + key
+            if isinstance(item, str) and key not in {"model_path", "encoder_path"} and key.endswith(("_path", "_manifest")):
+                path = Path(os.path.expanduser(os.path.expandvars(item)))
+                if "$" in str(path) or not path.exists():
+                    raise FileNotFoundError(f"Supply the required external asset {name}: {item}")
+                if path.is_file():
+                    inventory[name] = {"path": str(path.resolve()), "sha256": file_hash(path)}
+                else:
+                    files = {str(p.relative_to(path)): {"size": p.stat().st_size, "mtime_ns": p.stat().st_mtime_ns}
+                             for p in sorted(path.rglob("*")) if p.is_file() and ".git" not in p.parts}
+                    inventory[name] = {"path": str(path.resolve()), "inventory_sha256": digest(files)}
+            elif isinstance(item, (dict, list)):
+                inventory.update(_external_assets(item, name))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            inventory.update(_external_assets(item, f"{prefix}[{index}]"))
+    return inventory
+
+
 def execute(config_path, data_root, domain, output, seed):
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -109,12 +132,27 @@ def _execute(config_path, data_root, domain, output, seed):
     else:
         if config["method"] == "ddbc":
             backend_config.pop("model_path", None)
+            if algorithm.get("feature_mode", "clhe") == "clhe" and algorithm.get("context_mode", "provided_seed_items") == "provided_seed_items":
+                backend_config.pop("encoder_path", None)
+                backend_config.pop("encoder_revision", None)
+        if config["method"] == "text2bundle":
+            backend_config.pop("encoder_path", None)
+            backend_config.pop("encoder_revision", None)
         inventory = _model_inventory(backend_config)
     if config["method"] == "kd4bg" and algorithm.get("mode") == "teacher_student":
         inventory["student_model"] = _model_inventory({"model_path": algorithm.get("student_model", ""),
                                                        "model_revision": algorithm.get("student_revision")})
         if not inventory["student_model"]:
             raise ValueError("teacher_student requires a student_model snapshot")
+    inventory["external_assets"] = _external_assets(algorithm)
+    if config["method"] == "ddbc" and algorithm.get("feature_mode", "clhe") == "clhe":
+        from .baselines.ddbc_tokenizer import load_clhe_features
+        _, inventory["clhe_features"] = load_clhe_features(algorithm.get("clhe_manifest"),
+                                                            [row["item_id"] for row in dataset.catalog], dataset.train)
+    if config["method"] == "kd4bg" and algorithm.get("teacher_backend"):
+        inventory["teacher_backend"] = _model_inventory(algorithm["teacher_backend"])
+    if config["method"] == "aicl":
+        inventory["intent_evaluators"] = [_model_inventory(value) for value in algorithm.get("intent_evaluator_backends", [])]
     identity = {"config_sha256": file_hash(config_path), "data_manifest_sha256": dataset.manifest_sha256,
                 "code_sha256": code_hash(), "seed": seed, "method": config["method"], "domain": domain,
                 "model_inventory_sha256": digest(inventory)}
@@ -127,22 +165,37 @@ def _execute(config_path, data_root, domain, output, seed):
     atomic_json(identity_path, identity)
     ledger = Ledger(output / "checkpoint.jsonl", digest(identity))
     backend = create_backend(backend_config, config["profile"], dataset.catalog)
-    policy = algorithm.get("output_size_policy", "training_median")
-    k = int(algorithm.get("fixed_k", dataset.fixed_k))
-    if policy == "paper_rabr_mean" and config["method"] != "rabr":
-        reference = verify_result(output / algorithm["rabr_reference"])
+    policy = algorithm.get("output_size_policy", "training_mean")
+    budget_policy = algorithm.get("sampling_budget_policy", "method_default")
+    k = int(algorithm.get("fixed_k", dataset.training_mean_k if policy == "training_mean" else dataset.fixed_k))
+    reference = None
+    if policy == "paper_rabr_mean" or budget_policy == "paper_rabr_selected":
+        reference_path = (output / algorithm["rabr_reference"]).resolve()
+        reference = verify_result(reference_path)
+        expected = algorithm.get("rabr_reference_identity", {})
+        if any(reference.get(key) != value for key, value in expected.items()):
+            raise ValueError("RABR reference differs from the declared suite dependency")
         if (reference["status"] != "complete" or reference["method"] != "rabr" or reference["domain"] != domain
                 or reference["seed"] != seed or reference["data_manifest_sha256"] != dataset.manifest_sha256
                 or reference["profile"] != config["profile"] or reference["code_sha256"] != identity["code_sha256"]):
-            raise ValueError("Invalid RABR size reference")
-        reference_selection = json.loads((output / algorithm["rabr_reference"]).with_name("selection.json").read_text())
+            raise ValueError("Invalid RABR reference")
+        reference_selection = json.loads(reference_path.with_name("selection.json").read_text())
         if reference_selection["status"] != "certified":
-            raise ValueError("The size reference must be a certified RABR run")
-        k = max(1, math.floor(reference["calibration_mean_bundle_size"] + .5))
-    elif policy != "training_median" and policy != "paper_rabr_mean":
+            raise ValueError("The reference must be a certified RABR run")
+        if policy == "paper_rabr_mean":
+            k = max(1, math.floor(reference["calibration_mean_bundle_size"] + .5))
+        if budget_policy == "paper_rabr_selected":
+            algorithm["test_generation_samples"] = int(reference_selection["budget"])
+            if config["method"] == "rabr":
+                algorithm["budgets"] = [int(reference_selection["budget"])]
+    if policy not in {"training_median", "training_mean", "paper_rabr_mean"}:
         raise ValueError("Unknown output_size_policy")
+    if budget_policy not in {"method_default", "paper_rabr_selected"}:
+        raise ValueError("Unknown sampling_budget_policy")
     if k < 1:
         raise ValueError("Output size must be positive")
+    if config["method"] == "byob" and algorithm.get("evaluation_protocol") == "rabr_fixed_k":
+        algorithm["training_bundle_size"] = k
     status, selection, fit_metadata = "complete", None, {}
     records = []
     if config["method"] == "rabr":
@@ -167,20 +220,32 @@ def _execute(config_path, data_root, domain, output, seed):
         else:
             from .baselines.generative import create_generative
             predictor = create_generative(config["method"], algorithm, backend)
+        if hasattr(predictor, "validate_evaluation_rows"):
+            predictor.validate_evaluation_rows(dataset.test)
         contexts = [input_only(row) for row in dataset.test]
+        for field in getattr(predictor, "required_input_fields", ()):
+            if any(not context["input"].get(field) for context in contexts):
+                raise ValueError(f"{config['method']} requires explicit input.{field} for every test session")
         if any(ledger.get("prediction/" + row["session_id"]) is None for row in contexts):
             predictor.fit(dataset.train, dataset.validation, dataset.catalog)
             fit_metadata = getattr(predictor, "fit_metadata", {})
             atomic_json(output / "fit.json", fit_metadata)
         elif (output / "fit.json").exists():
             fit_metadata = json.loads((output / "fit.json").read_text())
-        for context in contexts:
+        for row, context in zip(dataset.test, contexts):
             key = "prediction/" + context["session_id"]
             prediction = ledger.get(key)
             if prediction is None:
                 previous_stats = dict(backend.stats)
                 prediction_start = time.monotonic()
-                value = predictor.predict(context, k, stable_seed(seed, "test", context["session_id"]))
+                evaluation_context = dict(context)
+                if config["method"] == "bunt":
+                    if algorithm.get("evaluation_protocol") != "interactive_target_feedback":
+                        raise ValueError("BUNT evaluation requires an explicitly configured interactive respondent protocol")
+                    from .baselines.bunt_feedback import TargetFeedback
+                    evaluation_context["feedback_provider"] = TargetFeedback(
+                        gold_items(row), predictor.metadata, protocol="heldout_evaluation")
+                value = predictor.predict(evaluation_context, k, stable_seed(seed, "test", context["session_id"]))
                 if not isinstance(value.items, list) or not set(value.items) <= {x["item_id"] for x in dataset.catalog}:
                     raise ValueError("Predictor returned invalid catalog IDs")
                 prediction = {"session_id": context["session_id"], "predicted_items": list(dict.fromkeys(value.items)),
@@ -195,7 +260,10 @@ def _execute(config_path, data_root, domain, output, seed):
         summary, per_session = evaluate_records([{**row, "gold_items": truths[row["session_id"]]} for row in records], beta=algorithm.get("beta", 1))
         atomic_json(output / "metrics.json", summary)
         _write_jsonl(output / "per-session.jsonl", per_session)
-    cost = {"attempt_wall_seconds": time.monotonic() - started, "attempt_backend": backend.stats,
+    auxiliary_calls = [call for record in records for call in record.get("metadata", {}).get("trace", [])
+                       if call.get("stage") == "intent_rating"]
+    auxiliary_calls += fit_metadata.get("teacher_trace", [])
+    cost = {"auxiliary_generation_calls": auxiliary_calls, "attempt_wall_seconds": time.monotonic() - started, "attempt_backend": backend.stats,
                                       "durable_prediction_cost": [row.get("cost", {}) for row in records],
                                       "round_costs": [v["cost"] for key, v in ledger.rows.items() if key.startswith("round/")]}
     atomic_json(output / "cost.json", cost)
@@ -206,6 +274,10 @@ def _execute(config_path, data_root, domain, output, seed):
     result = {"schema_version": 1, "status": status, **identity, "profile": config["profile"],
               "backbone": config.get("backbone", "none"), "research": config.get("research", {}),
               "output_size_policy": policy, "fixed_k": k, "fit": fit_metadata,
+              "evaluation_protocol": algorithm.get("evaluation_protocol", "query_history"),
+              "sampling_budget_policy": budget_policy, "test_generation_samples": algorithm.get("test_generation_samples", 1),
+              "reference_result_sha256": file_hash(reference_path) if reference is not None else None,
+              "selected_budget": selection.get("budget") if selection else None,
               "calibration_mean_bundle_size": selection.get("calibration_mean_bundle_size") if selection else None,
               "artifacts": artifacts, "protocol": dataset.manifest.get("protocol", {}),
               "metrics": summary, "cost": cost,

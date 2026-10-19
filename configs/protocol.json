@@ -15,14 +15,14 @@
   "validation_fraction_of_original_train": 0.1,
   "validation_policy": "latest_whole_timestamp_groups",
   "target_selection": "one_bundle_per_session_by_sha256_seed_domain_session",
-  "history": "strictly_past_latest_twenty_distinct_items",
+  "history": "strictly_past_latest_twenty_distinct_items_optional_verified_pretraining_events",
   "intent": "posthoc_annotation_as_assumed_query",
   "catalog": "static_transductive_title_and_nullable_category_metadata",
   "pattern_source": "final_training_selected_targets_only",
-  "fixed_k": "final_training_median_round_half_up_clamp_2_8",
+  "fixed_k": "rq3_final_training_mean_round_half_up_uncapped",
   "calibration_labels": "RABR_calibration_only",
-  "validation_labels": "training_early_stopping_only",
-  "test_labels": "evaluation_after_predictions",
+  "validation_labels": "method_declared_checkpoint_selection_or_diagnostics",
+  "test_labels": "postprediction_metrics_except_explicit_BUNT_feedback_simulator",
   "calibration_guarantee": "formal_test_algebra_under_assumptions_not_verified_exchangeability",
   "experiment_seeds": [
     42,
@@ -32,6 +32,11 @@
     46
   ],
   "primary_score": "equation8",
-  "rq3_alternate_score": "explicit_reconstructed_frequency_similarity",
-  "reproduction_status": "fresh_protocol_not_original_partition_reproduction"
+  "reproduction_status": "fresh_protocol_not_original_partition_reproduction",
+  "rq1_conventional_k": "matching_RABR_calibration_mean_with_explicit_reference_backbone",
+  "empty_history": "require_by_default_neutral_cold_start_only_if_explicit",
+  "rq3_components": [
+    "grounding_similarity",
+    "history_relevance"
+  ]
 }

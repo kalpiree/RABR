@@ -15,5 +15,4 @@ class LLM4B(LLMBase):
         prompt = [{'role': 'system', 'content': 'Select complementary products from the supplied candidates. Return only JSON with an items list of exact item_id strings.'},
                   {'role': 'user', 'content': context_text(context) + f'\nSelect up to {k} items matching the query and preferences.\nCandidates: ' + json.dumps(candidates, ensure_ascii=False)}]
         trace = []
-        raw = self.ask(prompt, seed, trace, 'retrieve_select')
-        return self.finish(raw, k, trace, {'candidate_ids': [x['item_id'] for x in candidates]}, [x['item_id'] for x in candidates])
+        return self.sample_predictions(prompt, k, seed, trace, 'retrieve_select', {'candidate_ids': [x['item_id'] for x in candidates]}, [x['item_id'] for x in candidates])

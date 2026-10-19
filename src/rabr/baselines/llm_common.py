@@ -115,13 +115,42 @@ class LLMBase:
             items = list(dict.fromkeys(x for x in descriptions if x in allowed))[:k]
             if any(x not in allowed for x in descriptions):
                 error = error or 'output included an item outside the candidate set'
+                items = []
         return Prediction(items=items, metadata={'method': self.name, 'implementation_variant': self.variant,
                           'llm_calls': len(trace), 'parse_error': error, 'trace': trace,
                           'fit': self.fit_metadata, **(extra or {})})
 
+    def sample_predictions(self, messages, k, seed, trace, stage, extra=None, allowed_ids=None):
+        from rabr.calibration import ground_round, prefix_scores
+        count = int(self.config.get('test_generation_samples', 1))
+        if count < 1 or (self.name == 'zero_shot' and count != 1):
+            raise ValueError('Zero-shot requires one generation; sample budgets must be positive')
+        rounds, errors = [], []
+        for sample in range(count):
+            raw = self.ask(messages, seed if count == 1 else stable_seed(seed, 'sample', sample), trace, stage)
+            descriptions, error = parse_items(raw)
+            if allowed_ids is None:
+                cosines = (self.index.encode(descriptions) @ self.index.vectors.T).clip(-1, 1) if descriptions else []
+                rounds.append(ground_round(self.index.ids, cosines, tau=self.index.tau, v_max=max(1, len(descriptions))))
+            else:
+                allowed = set(allowed_ids)
+                rounds.append({item: 1.0 for item in descriptions if item in allowed})
+                if any(item not in allowed for item in descriptions):
+                    error = error or 'output included an item outside the candidate set'
+                    rounds[-1] = {}
+            errors.append(error)
+        if allowed_ids is None:
+            scores = prefix_scores(rounds, dict.fromkeys(self.index.ids, .5), gamma=1.0)[-1]
+            aggregation = 'matching_sample_mean_grounding'
+        else:
+            scores = {item: sum(item in values for values in rounds) / count for item in set().union(*rounds)}
+            aggregation = 'candidate_selection_frequency'
+        items = sorted(scores, key=lambda item: (-scores[item], self.index.lookup[item]))[:k]
+        return Prediction(items=items, metadata={'method': self.name, 'implementation_variant': self.variant,
+            'llm_calls': len(trace), 'test_generation_samples': count, 'sample_aggregation': aggregation,
+            'parse_errors': errors, 'trace': trace, 'fit': self.fit_metadata, **(extra or {})})
+
     def predict(self, context, k, seed):
         if k < 1:
             raise ValueError('k must be positive')
-        trace = []
-        raw = self.ask(self.prompt(context, k), seed, trace, 'generate')
-        return self.finish(raw, k, trace)
+        return self.sample_predictions(self.prompt(context, k), k, seed, [], 'generate')

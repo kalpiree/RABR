@@ -102,6 +102,8 @@ def input_only(row):
                      "timestamp": h["timestamp"]} for h in value["history"]]}}
     if "user_id" in row:
         result["user_id"] = str(row["user_id"])
+    if 'seed_items' in value:
+        result['input']['seed_items'] = list(value['seed_items'])
     return result
 
 
@@ -124,6 +126,9 @@ class Dataset:
     def test(self): return self.splits["test"]
     @property
     def fixed_k(self): return self.manifest["fixed_k"]
+    @property
+    def training_mean_k(self):
+        return math.floor(statistics.mean(len(row["target"]["gold_items"]) for row in self.train) + .5)
 
     def inputs(self, split):
         return [input_only(row) for row in self.splits[split]]
@@ -153,6 +158,10 @@ def validate_dataset(catalog, splits, domain):
                 raise ValueError("Invalid input")
             if row["input"].get("has_intent", bool(intent.strip())) != bool(intent.strip()):
                 raise ValueError("Inconsistent intent flag")
+            if 'seed_items' in row['input']:
+                seeds = row['input']['seed_items']
+                if not isinstance(seeds, list) or not seeds or any(not isinstance(item, str) for item in seeds) or len(seeds) != len(set(seeds)) or not set(seeds) <= known:
+                    raise ValueError('Seed items must be distinct supplied catalog IDs')
             for event in history:
                 if event["item_id"] not in known or not isinstance(event["title"], str):
                     raise ValueError("Invalid history item")
@@ -255,9 +264,11 @@ def category(raw):
     return min(paths, key=lambda path: (-len(path), path))[-1]
 
 
-def raw_domain(source, domain, seed, validation_fraction, history_limit):
+def raw_domain(source, domain, seed, validation_fraction, history_limit, include_pretrain_history=False, require_history=False):
     directory = Path(source) / domain
     source_hashes = {name: file_hash(directory / name) for name in RAW_FILES}
+    if include_pretrain_history:
+        source_hashes['user_item_pretrain.csv'] = file_hash(directory / 'user_item_pretrain.csv')
     titles = unique_map(csv_rows(directory / "item_titles.csv"), "item ID", "titles")
     categories = unique_map(csv_rows(directory / "item_categories.csv"), "item ID", "categories")
     if set(titles) != set(categories):
@@ -275,8 +286,20 @@ def raw_domain(source, domain, seed, validation_fraction, history_limit):
         bundles[row["session ID"]].add(row["bundle ID"])
     for row in csv_rows(directory / "bundle_item.csv"):
         items[row["bundle ID"]].add(row["item ID"])
-    for row in csv_rows(directory / "user_item.csv"):
-        events[row["user ID"]].append((int(row["timestamp"]), row["item ID"]))
+    history_sources = ['user_item.csv'] + (['user_item_pretrain.csv'] if include_pretrain_history else [])
+    relevant_users = {value['user_id'] for value in sessions.values()}
+    history_counts = {}
+    for name in history_sources:
+        count = {'source_rows': 0, 'matching_user_rows': 0, 'matching_user_catalog_rows': 0}
+        with (directory / name).open(encoding='utf-8', newline='') as stream:
+            for row in csv.DictReader(stream):
+                count['source_rows'] += 1
+                if row['user ID'] in relevant_users:
+                    count['matching_user_rows'] += 1
+                    if row['item ID'] in by_item:
+                        count['matching_user_catalog_rows'] += 1
+                        events[row['user ID']].append((int(row['timestamp']), row['item ID']))
+        history_counts[name] = count
     intents = unique_map(csv_rows(directory / "bundle_intent.csv"), "bundle ID", "intent")
     rows = []
     for sid in sorted(bundles, key=id_key):
@@ -294,7 +317,19 @@ def raw_domain(source, domain, seed, validation_fraction, history_limit):
         rows.append({"session_id": domain + ":" + sid, "original_session_id": sid, "domain": domain, **info,
                      "input": {"intent": intent, "has_intent": bool(intent), "history": history},
                      "target": {"bundle_id": chosen, "gold_items": sorted(items[chosen], key=id_key)}})
-    return catalog, split_sessions(rows, validation_fraction), {"mode": "raw_bundlerec", "files": source_hashes, "target_seed": seed}
+    original_count = len(rows)
+    excluded = sorted(row['session_id'] for row in rows if not row['input']['history']) if require_history else []
+    if require_history:
+        rows = [row for row in rows if row['input']['history']]
+    cohort = {'policy': 'nonempty_strictly_prior_history' if require_history else 'all_annotated_sessions',
+              'filter_stage': 'before_chronological_partitioning', 'original_sessions': original_count,
+              'retained_sessions': len(rows), 'excluded_sessions': len(excluded),
+              'excluded_session_ids_sha256': digest(excluded),
+              'retained_session_ids_sha256': digest(sorted(row['session_id'] for row in rows)),
+              'selection_fields': ['input.history'] if require_history else []}
+    return catalog, split_sessions(rows, validation_fraction), {"mode": "raw_bundlerec", "files": source_hashes,
+        "target_seed": seed, 'history_sources': history_sources, 'history_source_counts': history_counts,
+        'history_rule': 'same_user_strictly_earlier_timestamp_with_catalog_metadata', 'cohort': cohort}
 
 
 def import_domain(source, domain, validation_fraction, history_limit=20):
@@ -310,17 +345,25 @@ def import_domain(source, domain, validation_fraction, history_limit=20):
     return catalog, splits, {"mode": "prepared_import", "files": {p.name: file_hash(p) for p in paths}}
 
 
-def prepare(source, output, domains=DOMAINS, mode="raw", seed=42, validation_fraction=.1, history_limit=20):
+def prepare(source, output, domains=DOMAINS, mode="raw", seed=42, validation_fraction=.1, history_limit=20, include_pretrain_history=False, require_history=False):
     if mode not in ("raw", "import"):
         raise ValueError("Expected raw or import mode")
     if type(seed) is not int or seed < 0 or type(history_limit) is not int or history_limit < 0:
         raise ValueError("Seed and history limit must be nonnegative integers")
     if not domains or len(domains) != len(set(domains)):
         raise ValueError("Domains must be nonempty and unique")
+    if include_pretrain_history and mode != 'raw':
+        raise ValueError('Pretraining-history inclusion requires raw source files')
+    if require_history and mode != 'raw':
+        raise ValueError('History cohort filtering requires raw mode before chronological partitioning')
+    if require_history and history_limit == 0:
+        raise ValueError('History cohort filtering requires a positive history limit')
     protocol = {"schema_version": 1, "unit": "one_selected_bundle_per_annotated_session",
         "outer_split": "chronological_nearest_60_30_10_whole_timestamp_groups",
         "validation": {"fraction_of_original_train": validation_fraction, "policy": "latest_whole_timestamp_groups"},
         "history": "strictly_prior_only", "maximum_history_items": history_limit,
+        'include_pretrain_history': bool(include_pretrain_history),
+        'cohort': 'nonempty_strictly_prior_history_before_splitting' if require_history else 'all_annotated_sessions',
         "intent": "posthoc_annotations_as_assumed_queries", "catalog": "static_transductive_metadata",
         "patterns": "selected_targets_from_final_train_only", "calibration_labels": "RABR_calibration_only",
         "fixed_k": "final_train_median_round_half_up_clamp_2_8", "source_target_selection_seed": seed}
@@ -328,6 +371,6 @@ def prepare(source, output, domains=DOMAINS, mode="raw", seed=42, validation_fra
     for domain in domains:
         if not re.fullmatch(r"[a-z][a-z0-9_-]*", domain):
             raise ValueError("Unsafe domain name")
-        staged[domain] = raw_domain(source, domain, seed, validation_fraction, history_limit) if mode == "raw" else import_domain(source, domain, validation_fraction, history_limit)
+        staged[domain] = raw_domain(source, domain, seed, validation_fraction, history_limit, include_pretrain_history, require_history) if mode == "raw" else import_domain(source, domain, validation_fraction, history_limit)
         validate_dataset(staged[domain][0], staged[domain][1], domain)
     return {domain: save_dataset(output, domain, *value, protocol).manifest for domain, value in staged.items()}

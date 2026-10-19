@@ -13,6 +13,21 @@
     "pattern_count": 8,
     "rule_neighbors": 1,
     "local_files_only": true,
-    "implementation": "teacher_rules_lora_student"
+    "implementation": "teacher_rules_lora_student",
+    "teacher_backend": {
+      "type": "transformers",
+      "model_path": "${RABR_KD_TEACHER_PATH}",
+      "device": "cuda",
+      "dtype": "bfloat16",
+      "temperature": 0.7
+    },
+    "batch_size": 2,
+    "warmup_steps": 5,
+    "weight_decay": 0.01,
+    "lr_scheduler": "linear",
+    "checkpoint_selection": "final_epoch",
+    "load_in_4bit": true,
+    "shuffle_seed": 65,
+    "adapter_seed": 3407
   }
 }

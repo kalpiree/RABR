@@ -1,59 +1,43 @@
 # Generative methods
 
-All methods implement `fit(train, validation, catalog)` and `predict(context, k, seed)`. The common runner passes only the intent, strict-past history, session identifier, timestamp, and optional user identifier to prediction. Training targets are available during fitting; validation selects model checkpoints. RABR calibration sessions do not enter these methods' fitting procedures.
+All methods implement `fit(train, validation, catalog)` and `predict(context, k, seed)`. Calibration targets do not enter their fitting. The query/history adapter and the original observed-session or bundle-completion tasks are different evaluation conditions; results must identify which one was used.
 
-Generated product descriptions are grounded against the full static title catalog using the configured shared encoder. Exact catalog IDs are returned. Invalid JSON is recorded and produces an empty recommendation; no hidden retrieval fallback repairs malformed bundle outputs. Prediction metadata identifies the implementation variant and language-model calls.
+## Zero-shot and LLM4B
 
-| Method | Implementation | Source |
-| --- | --- | --- |
-| Zero-shot | One intent/history prompt, product-description grounding | RABR baseline protocol |
-| LLM4B | Query cosine recall of 30 catalog items, then LLM selection using query and history | Text2Bundle §5.2 |
-| Text2Bundle | Intent decomposition, LightGCN and FM pretraining, state/action Transformers, BPR pretraining, double DQN and EOS action | Text2Bundle §§3–4 |
-| AICL | Nearest training demonstrations, mutual correction, labeled bundle feedback, intent feedback, rule summarization | SIGIR 2024 AICL |
-| KD4BG | Teacher-derived category rules plus response-only LoRA student training | KD4BG 2025/2026 |
-| KD4BG PatternICL | Training category patterns supplied at inference | Released KD4BG PatternICL configuration |
-| DDBC | Residual item codes, masked denoising Transformer, constrained reverse diffusion | ICLR 2026 DDBC |
+Zero-shot makes one recommendation completion. LLM4B retrieves 30 candidates by query/title cosine, then selects exact IDs using query and history, following the baseline in [Text2Bundle §5.2](https://arxiv.org/html/2310.18004). The full-catalog encoder and exact prompt serialization are declared benchmark choices. Invalid JSON is empty; an invalid exact-ID selection invalidates its sample. Configured repeated final completions have explicit cost and aggregation receipts.
 
-## LLM4B and Text2Bundle
+## Text2Bundle
 
-The [Text2Bundle paper](https://arxiv.org/html/2310.18004) defines LLM4B in §5.2. Both names therefore legitimately reference the same paper. LLM4B is its retrieval-and-selection baseline. Text2Bundle is the learned reinforcement-learning model, implemented separately here.
-
-Text2Bundle extracts four or five product interests with the language model and retains the original query. Train-only user–item edges pretrain LightGCN embeddings; a two-field factorization model ranks items retrieved by query/title cosine. Unknown users use their available history embeddings, or the mean training-user vector when history is empty. A six-type Transformer state represents query text, history text, selected-bundle text, user ID, history IDs and selected IDs. A second Transformer encodes candidate actions. A learned EOS action terminates generation.
-
-Cosine BPR pretraining samples a training bundle prefix, an unselected positive and a negative outside that bundle. Double DQN then uses replay, a target network, epsilon-greedy exploration and Huber TD loss. The reward combines training-bundle precision, the pretrained personalization score, selected-item text similarity and entropy across inferred interests. Validation F1 selects the checkpoint; prediction stops at EOS or the requested size limit.
-
-This is a paper-based reconstruction. The paper's external Amazon pretraining graph and RoBERTa features are replaced with training-only interactions and the shared configured encoder. Two-field FM on user/item IDs has the usual factor-dot-product form. Hyperparameters in `configs/methods/text2bundle.json` are explicit repository defaults; they are not a recovered author configuration. The accessible paper states that code and data will be released, but no official runtime was identified from its linked materials. The implementation retains the learned architecture rather than replacing Text2Bundle with a dialogue prompt.
+The learned Text2Bundle path uses RoBERTa text representations, supplied Amazon-domain LightGCN features, a sparse factorization machine, state/action Transformers, BPR pretraining and double DQN. The old shared-encoder and train-only graph replacements are removed. See [Text2Bundle inputs and implementation](text2bundle.md) for asset manifests, native constants, the EOS policy and ambiguities in the source paper.
 
 ## AICL
 
-Sources: [paper](https://arxiv.org/html/2312.16262v2), [official source](https://github.com/BundleRec/bundle_generation/tree/604d9c6d774dd057bee1ece3b68e8c406ac97e9d), DOI [10.1145/3626772.3657808](https://doi.org/10.1145/3626772.3657808).
+Sources: [paper](https://arxiv.org/html/2312.16262v2), [official code](https://github.com/BundleRec/bundle_generation/tree/604d9c6d774dd057bee1ece3b68e8c406ac97e9d).
 
-The source task groups products in an observed purchase session. This repository adapts that workflow to a query and strict-past history over the full catalog. Nearest demonstrations come only from training. Their labeled targets support automatic keep/remove/missing feedback; neither validation nor target-test labels are used for demonstrations. Intent ratings average repeated evaluations within each rater and request revision if any rater scores a reference aspect higher. The original heterogeneous ChatGPT/Claude evaluators are replaced with independent seeds of the configured backbone, recorded as `same_backbone_independent_seeds`. Demonstrations are cached in memory by training session and seed.
+Training neighbors supply demonstrations. Generation and inferred intent are mutually corrected; training labels supply bundle feedback. Two distinct evaluator models rate intent naturalness and coverage on 1–3 scales and motivation on a 1–2 scale. Each evaluator repeats its rating three times. An aspect is revised if either evaluator's average prefers the reference intent. Invalid ratings fail explicitly. Model paths are expanded and resolved before enforcing evaluator distinctness; separate seeds of one checkpoint do not satisfy this requirement.
+
+Set `RABR_AICL_RATER1_PATH` and `RABR_AICL_RATER2_PATH` to two local chat snapshots. Their identities and call costs are retained. Choosing local evaluator models replaces the released ChatGPT/Claude model identities, not the two-evaluator procedure. Exact historical proprietary endpoints cannot be reproduced from local weights.
+
+The RABR adapter recommends from query/history over the full catalog. The original AICL task groups already observed products into multiple bundles. That task change remains explicit; no held-out bundle labels enter demonstration construction, retrieval or prompt feedback.
 
 ## KD4BG
 
-Sources: [paper](https://arxiv.org/abs/2504.17220), [official source](https://github.com/KaiDF/KD4BG/tree/f9a713ee8ef8c435d78c65710ba794e9e0e3ad0a).
+Sources: [paper](https://arxiv.org/abs/2504.17220), [official code](https://github.com/KaiDF/KD4BG/tree/f9a713ee8ef8c435d78c65710ba794e9e0e3ad0a).
 
-`configs/methods/kd4bg.json` enables `teacher_student`. The teacher extracts reusable rules from labeled training bundles. The student receives intent/history, mined category patterns and retrieved training rules, and learns the training bundle through response-only causal loss. Validation chooses the adapter after each epoch. LoRA targets attention and MLP projections with rank 16, alpha 16, learning rate 0.0002 and three epochs. Set `RABR_STUDENT_MODEL_PATH` to a local chat model; the teacher uses the common configured backbone. The `distillation` extra supplies PEFT.
+The default teacher/student path mines training-only category sets with Apriori support pruning. It generates an initial training prediction, compares it with training labels, reviews its errors, extracts reusable rules, and generates deeper explanatory knowledge. The teacher cache records each stage and is bound to input/config hashes. Teacher knowledge is retrieved only from training examples.
 
-The teacher cache is bound to input/config hashes and saved after each training example. Adapter, optimizer, RNG and selection state are saved after each epoch. A restart repeats at most the interrupted epoch. The frozen teacher rules can be regenerated from training data; no private teacher assets are required.
+Set `RABR_KD_TEACHER_PATH` and `RABR_STUDENT_MODEL_PATH` explicitly. Student training uses response-only causal loss, LoRA rank/alpha16 on attention and MLP projections, batch2 with four-step accumulation, five warmup updates, linear decay, learning rate0.0002, weight decay0.01 and three epochs. The released-style profile selects the final epoch. Validation losses are diagnostic. Model, optimizer, scheduler and RNG state are checkpointed each epoch. A 4-bit CUDA profile uses PEFT/bitsandbytes; CPU verification explicitly disables quantization.
 
-`configs/methods/kd4bg_pattern.json` explicitly selects `pattern_icl`. It mines category multisets of length 2–4 with training-session support at least two, retrieves patterns by semantic similarity, and makes one generation call. This is a partial configuration of KD4BG. It must be labeled **KD4BG PatternICL**, not the complete distilled system.
+The original release uses Unsloth and proprietary teacher outputs for observed-session bundle detection. This implementation uses Transformers/PEFT and freshly produced teacher knowledge for the RABR query/history task. Semantic retrieval of knowledge in that adapter is not the release's category-similar observed-session lookup. These task, teacher and runtime differences remain declared; this is not a claim to recover the authors' SFT corpus or exact model scores.
 
-Both variants use the new query/history task and category miner. These are documented task adaptations, not reproductions of the authors' observed-session benchmark scores.
+The optional `kd4bg_pattern.json` is a partial PatternICL configuration of the same method, not a second baseline. It is excluded from the main comparison suite.
 
 ## DDBC
 
-Sources: [ICLR 2026 paper](https://proceedings.iclr.cc/paper_files/paper/2026/file/fec8e70600149b3c496e94d1f76ee0a7-Paper-Conference.pdf), [official source](https://github.com/LiAi16/DDBC/tree/e1f4afc59121662e626ffefde79316a5e0dde044).
+Sources: [ICLR 2026 paper](https://proceedings.iclr.cc/paper_files/paper/2026/file/fec8e70600149b3c496e94d1f76ee0a7-Paper-Conference.pdf), [official code](https://github.com/LiAi16/DDBC/tree/e1f4afc59121662e626ffefde79316a5e0dde044).
 
-Catalog text embeddings are whitened to 64 dimensions and quantized with three FAISS residual codebooks. A fourth occurrence digit resolves collisions in stable catalog order. The default codebook size is 128. Six 64-dimensional Transformer blocks use eight attention heads, AdaLN-zero, noninterleaved RoPE, 128-dimensional conditioning and the released default of disabled timestep conditioning. PyTorch SDPA replaces the upstream FlashAttention dependency.
+The native feature path requires verified CLHE features and explicitly supplied seed items. It uses residual quantization, masked diffusion and level-wise illegal-token filtering. Full-catalog retrieval does not construct candidate sets from test targets. The separate query-seed adapter is a distinct evaluation protocol for the same method. See [DDBC](ddbc.md) for feature provenance, decoder, training and evaluation details.
 
-Only item-code positions are corrupted. At time `t`, the masking probability is `0.999*t`; continuous SUBS loss weights masked-token cross entropy by `1/t`, normalized by code positions per example and then averaged across the batch. Same-length batches avoid padding and preserve all training bundle lengths. Length groups are sampled in proportion to their frequency. Adjacent swaps augment item order. AdamW, warmup and EMA follow the released settings; fixed validation corruption streams select the EMA checkpoint.
+## Dependencies and scope
 
-Inference retrieves one seed from query/history text without consulting the target. Reverse diffusion reveals masked codes over 25 steps, clamps structural tokens and seed codes, and constrains revealed assignments to existing, distinct catalog items. Matching feasibility prevents partial assignments that would make a distinct full bundle impossible. These full-catalog constraints are stricter than the released decoder. The paper's Appendix D.2 discusses seed-then-complete personalization; shared text embeddings replace its CLHE representation. The output-size policy is supplied by the common runner.
-
-Checkpoints include optimizer, EMA, batch/corruption/global RNG state and input identity. PCA, FAISS index, catalog codes and selected-checkpoint metadata are written under the run's model directory. No imports refer to an older workspace or a cluster release.
-
-## Runtime
-
-The model modules import Torch, Transformers, FAISS and PEFT only when their corresponding learned methods are fitted. Base package import and prompt methods require NumPy only. See `THIRD_PARTY_NOTICES.md` for attribution and the inspected source-license status.
+Torch, Transformers, FAISS and PEFT load only for the methods requiring them. The `quantization` extra supplies Linux bitsandbytes for 4-bit student training. No model weights or proprietary feature files are bundled. Source acknowledgements are in `THIRD_PARTY_NOTICES.md`.

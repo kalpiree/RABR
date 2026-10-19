@@ -59,6 +59,8 @@ def build_suite(suite_paths, data_root, output, *, backbone_configs=None, method
             if profile == "experiment" and datasets[domain].manifest.get("protocol", {}).get("dataset_role") == "synthetic_smoke_only":
                 raise ValueError("Synthetic fixtures cannot be used for experiment profiles")
         for recipe, parameters in expanded_experiments(spec):
+            if {'rabr_reference', 'rabr_reference_identity'} & parameters.keys():
+                raise ValueError('Reference paths are derived from declared dependency selectors')
             method = recipe["method"]
             if method not in METHODS:
                 raise ValueError("Unknown method " + method)
@@ -90,14 +92,44 @@ def build_suite(suite_paths, data_root, output, *, backbone_configs=None, method
     for job in jobs:
         config = configurations[job["id"]]
         effective_algorithm = {**config["algorithm"], **config["research"]["parameters"]}
-        if effective_algorithm.get("output_size_policy") == "paper_rabr_mean" and job["method"] != "rabr":
-            references = [other for other in jobs if other["method"] == "rabr" and other["research"]["rq"] == "rq1"
+        size_reference = effective_algorithm.get("output_size_policy") == "paper_rabr_mean" and job["method"] != "rabr"
+        budget_reference = effective_algorithm.get("sampling_budget_policy") == "paper_rabr_selected"
+        if size_reference or budget_reference:
+            reference_backbone = effective_algorithm.get("reference_backbone", job["backbone"])
+            if reference_backbone == "none":
+                raise ValueError('Conventional methods need an explicit reference_backbone for RABR dependencies')
+            reference_rq = effective_algorithm.get('reference_rq', 'rq1')
+            reference_variant = effective_algorithm.get('reference_variant', 'main')
+            references = [other for other in jobs if other["method"] == "rabr" and other["research"]["rq"] == reference_rq
+                          and other['research']['variant'] == reference_variant
                           and other["domain"] == job["domain"] and other["seed"] == job["seed"]
-                          and other["backbone"] == (job["backbone"] if job["backbone"] != "none" else specs[0][1]["backbones"][0])]
+                          and other["backbone"] == reference_backbone and other['id'] != job['id']]
             if len(references) != 1:
-                raise ValueError("paper_rabr_mean requires exactly one matching RQ1 RABR job")
+                raise ValueError("RABR dependency requires exactly one matching reference job")
             job["requires"] = [references[0]["id"]]
+            job['reference_backbone'] = reference_backbone
             config["algorithm"]["rabr_reference"] = "../" + references[0]["id"] + "/result.json"
+            config['algorithm']['reference_semantics'] = {
+                'output_size': 'rounded_calibration_mean_no_test_predictions' if size_reference else None,
+                'generation_budget': 'selected_calibration_prefix_per_test_session' if budget_reference else None}
+    by_id = {job['id']: job for job in jobs}
+    finalized = set()
+
+    def finalize(job, ancestors):
+        if job['id'] in finalized:
+            return
+        if job['id'] in ancestors:
+            raise ValueError('Cyclic RABR dependencies')
+        for reference_id in job['requires']:
+            reference = by_id[reference_id]
+            finalize(reference, ancestors | {job['id']})
+            configurations[job['id']]['algorithm']['rabr_reference_identity'] = {
+                key: reference[key] for key in ('method', 'backbone', 'domain', 'seed', 'data_manifest_sha256', 'config_sha256')}
+        job['config_sha256'] = hashlib_config(configurations[job['id']])
+        finalized.add(job['id'])
+
+    for job in jobs:
+        finalize(job, set())
     manifest = {"schema_version": 1, "profile": profile, "code_sha256": source_hash(), "data": os.path.relpath(data_root, output),
                 "suite_sha256": {path.name: file_hash(path) for path, _ in specs}, "jobs": jobs}
     if len(manifest["suite_sha256"]) != len(specs):

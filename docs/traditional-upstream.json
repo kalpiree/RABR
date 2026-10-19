@@ -1,28 +1,41 @@
 {
   "schema_version": 1,
   "reviewed_date": "2026-10-19",
-  "implementation": "Independent PyTorch reconstructions; no upstream source files vendored",
+  "implementation": "POG/BGN equations and BUNT interaction reconstruction; BYOB imports verified external official model definitions; no upstream code vendored",
   "methods": {
     "pog": {
       "paper": "https://arxiv.org/abs/1905.01866",
       "official_release": "https://github.com/wenyuer/POG",
       "official_release_scope": "dataset; model implementation not found in release",
       "implemented_sections": [
-        "4.2 masked-item FOM",
-        "4.3 Per/Gen and sampled next-item objective"
+        "4.1 external original modalities and category-triplet fusion",
+        "4.2 every-position masked FOM, transition-output sampled loss",
+        "4.3 independent Per transition and pretrained FOM-to-Gen transfer",
+        "Algorithm 1 END decoding; explicit RABR fixed-K adapter"
       ],
-      "profile": "RABR appendix layer/width configuration with text/category feature adaptation"
+      "profile": "Original modality dimensions 1536+300+160; embedding 128; six layers, width 64, eight heads; external original feature assets required. RABR RQ1 explicitly sets embedding and Transformer width to 512.",
+      "unrecovered": [
+        "Proprietary Behemoth feature extractor/checkpoints",
+        "Original TextCNN checkpoints/training vocabulary",
+        "Dida online filtering/category rules",
+        "Original training schedule"
+      ]
     },
     "bgn": {
       "paper": "https://arxiv.org/abs/1904.01933",
       "doi": "https://doi.org/10.1145/3308558.3313568",
       "official_implementation": null,
       "implemented_sections": [
-        "4.2 bundle Jaccard similarity",
-        "4.3 text-CNN, attention LSTM, feature-aware softmax",
-        "4.4 masked beam search and DPP at each expansion"
+        "4.3 item/category feature-aware sampled softmax",
+        "5.1 CNN widths 1,2,4,8,12,16,32,64 with 12 channels; two attention LSTM layers",
+        "4.4 native END penalty, beam pruning and bundle Jaccard DPP",
+        "Explicit RABR fixed-K adapter"
       ],
-      "profile": "fixed-length full-catalog reconstruction; returns first bundle and retains diversified list"
+      "profile": "Native purchase-history and price-order inputs; defaults 1024 negative samples and beam width 50; real catalog prices required for Amazon profile",
+      "unrecovered": [
+        "No official model implementation found",
+        "Exact nonlinear feature-map architecture and optimizer schedule omitted in article"
+      ]
     },
     "bunt": {
       "paper": "https://arxiv.org/abs/2207.12628",
@@ -40,7 +53,7 @@
         "5.3 cloze pretraining",
         "5.4 train-only simulated policy learning"
       ],
-      "profile": "fixed slots; text-derived attributes; category consultation; target-free one-shot when no external respondent"
+      "profile": "Native category/attribute metadata and historical bundles mandatory; four-policy PPO, accepted-slot replacement, 20-turn external feedback; all proposed items in reported prediction"
     },
     "byob": {
       "paper": "https://crazynote.v.netease.com/2022/0704/a0bd31b6913c14c50bd641d4f4ced703.pdf",
@@ -49,10 +62,26 @@
       "license_file_found": false,
       "inspected_files": [
         "byob/models/policy_net.py",
+        "byob/models/baseline_ncf.py",
+        "byob/models/item2vec.py",
         "byob/models/sim_env.py",
-        "main_sim.py"
+        "main_sim.py",
+        "byob/data_utils.py",
+        "byob/metrics.py"
       ],
-      "profile": "B-M reward branch; input-conditioned item preference and co-bundle compatibility models; clipped PPO with epsilon mixture"
+      "profile": "Persistent users and native histories; externally supplied target-independent prediction candidate pools; no compact reward, intent proxy, or full-catalog fallback",
+      "implemented_sections": [
+        "Official ItemPointer, ItemNCFModel, SkipGramModel definitions loaded unchanged from verified commit/files; singleton input dimensions preserved by adapter",
+        "NCF BCE and click-sequence SGNS reward fitting",
+        "Paper 5.1.3 item-reward then bundle-metric curriculum",
+        "Paper 5.2.3 compatibility-neighbor threshold; gamma=1; clipped PPO with validation early stopping",
+        "Explicit RABR fixed-K target-cardinality and epsilon=.2 exploration adapter; identical mixed probabilities in PPO rollout/update"
+      ],
+      "unrecovered": [
+        "Released NCF differs from the paper-illustrated preference network",
+        "PyTorch PPO epoch/minibatch budgets do not reproduce the exact legacy RLlib optimizer",
+        "Native data assets/splits and convergence validation not supplied"
+      ]
     }
   }
 }

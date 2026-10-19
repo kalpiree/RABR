@@ -1,20 +1,24 @@
 {
   "algorithm": {
-    "implementation": "paper_based_reconstruction",
+    "implementation": "paper_sampled_FA_BGN",
+    "feature_profile": "item_and_category_ID_embeddings",
     "device": "cpu",
-    "epochs": 100,
-    "batch_size": 16,
-    "learning_rate": 0.0003,
-    "weight_decay": 1e-05,
-    "patience": 10,
-    "grad_clip": 1.0,
-    "feature_dim": 128,
-    "dropout": 0.1,
     "hidden_dim": 64,
     "heads": 4,
-    "layers": 2,
-    "beam_width": 20,
-    "bundle_list_size": 5,
-    "diversity": 0.1
+    "epochs": 100,
+    "batch_size": 16,
+    "learning_rate": 0.001,
+    "l2_regularization": 5e-05,
+    "patience": 10,
+    "grad_clip": 1.0,
+    "negative_samples": 1024,
+    "beam_width": 50,
+    "bundle_list_size": 10,
+    "diversity": 0.1,
+    "end_shift": 0,
+    "maximum_bundle_size": 10,
+    "use_category": true,
+    "target_order": "price_desc",
+    "decoding": "native_end"
   }
 }

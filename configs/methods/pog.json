@@ -1,19 +1,25 @@
 {
   "algorithm": {
-    "implementation": "paper_based_reconstruction",
+    "implementation": "paper_multimodal_FOM_POG",
+    "feature_profile": "InceptionResNetV2_TextCNN_Behemoth",
+    "pog_assets_path": "${POG_ASSETS_PATH}",
     "device": "cpu",
+    "hidden_dim": 64,
+    "embedding_dim": 128,
+    "heads": 8,
+    "layers": 6,
+    "per_layers": 6,
+    "embedding_epochs": 10,
+    "embedding_learning_rate": 0.001,
+    "fom_epochs": 10,
     "epochs": 100,
     "batch_size": 16,
     "learning_rate": 0.0003,
-    "weight_decay": 1e-05,
     "patience": 10,
     "grad_clip": 1.0,
-    "feature_dim": 128,
     "dropout": 0.1,
-    "hidden_dim": 512,
-    "heads": 8,
-    "layers": 6,
-    "fom_epochs": 10,
-    "negative_samples": 3
+    "minimum_history": 11,
+    "maximum_bundle_size": 10,
+    "decoding": "native_end"
   }
 }

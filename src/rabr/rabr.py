@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import math
+import json
 
 from .baselines.llm_common import CatalogIndex, context_text, parse_items
 from .calibration import CalibrationExample, CalibrationGrid, calibrate, ground_round, prefix_scores, select_bundle
@@ -20,21 +21,50 @@ class RABR:
             raise ValueError("gamma must be in [0,1]")
         self.mode = config.get("score_mode", "equation8")
         self.ablation = config.get("ablation", "none")
-        if self.mode not in {"equation8", "frequency_similarity"}:
-            raise ValueError("Unknown score mode")
-        if self.ablation not in {"none", "without_frequency", "without_similarity", "fixed_threshold", "multi_sample_fixed_k", "fixed_k"}:
+        if self.mode != "equation8":
+            raise ValueError("RABR uses the Equation 8 score")
+        if self.ablation not in {"none", "without_grounding", "without_relevance", "multi_sample_fixed_k", "fixed_k"}:
             raise ValueError("Unknown RABR ablation")
-        if self.ablation in {"without_frequency", "without_similarity"} and self.mode != "frequency_similarity":
-            raise ValueError("Frequency ablations require the explicitly defined frequency_similarity score")
+        self.effective_gamma = {"without_grounding": 0.0, "without_relevance": 1.0,
+                                "multi_sample_fixed_k": 1.0}.get(self.ablation, self.gamma)
+        self.empty_history_policy = config.get("empty_history_policy", "require")
+        if self.empty_history_policy not in {"require", "neutral"}:
+            raise ValueError("empty_history_policy must be require or neutral")
+
+    def relevance(self, context):
+        history = context["input"]["history"]
+        profile = "Prior interactions: " + json.dumps(
+            [{"title": self.index.catalog[self.index.lookup[item["item_id"]]]["title"],
+              "category": self.index.catalog[self.index.lookup[item["item_id"]]].get("category")} for item in history],
+            ensure_ascii=False)
+        if not history:
+            if self.effective_gamma < 1 and self.empty_history_policy == "require":
+                raise ValueError("Equation 8 requires interaction history; supply genuine prior interactions "
+                                 "or explicitly select empty_history_policy=neutral for a cold-start adaptation")
+            return {item: .5 for item in self.index.ids}, digest({"history": [], "policy": self.empty_history_policy})
+        cosines = (self.index.encode([profile])[0] @ self.index.vectors.T).clip(-1, 1)
+        return {item: (1 + float(score)) / 2 for item, score in zip(self.index.ids, cosines)}, digest(profile)
+
+    def messages(self, context, candidates, v_max):
+        content = context_text(context)
+        if self.ablation != "multi_sample_fixed_k":
+            titles = [self.index.catalog[self.index.lookup[item]]["title"] for item in sorted(candidates)]
+            content += "\nCandidate items collected so far: " + json.dumps(titles, ensure_ascii=False)
+            content += ("\nUsing the provided interaction history, suggest additional relevant items for the user's bundle. "
+                        "Do not repeat any of the listed items.")
+        content += f"\nReturn at most {v_max} descriptions."
+        return [{"role": "system", "content": "Recommend complementary products for the supplied intent and prior interactions. Return only JSON with an items list of product-description strings."},
+                {"role": "user", "content": content}]
 
     def scores(self, context, budget, split):
         context = input_only(context)
         v_max = int(self.config.get("v_max", 8))
-        messages = [{"role": "system", "content": "Recommend complementary products for the supplied intent and prior interactions. Return only JSON with an items list of product-description strings."},
-                    {"role": "user", "content": context_text(context) + f"\nReturn at most {v_max} descriptions."}]
-        rounds = []
-        traces = []
+        relevance, profile_hash = self.relevance(context)
+        rounds, traces, candidates = [], [], set()
         for index in range(budget):
+            messages = self.messages(context, candidates, v_max)
+            expected = {"context_sha256": digest(context), "prompt_sha256": digest(messages),
+                        "profile_sha256": profile_hash, "candidate_ids": sorted(candidates)}
             key = f"round/{split}/{context['session_id']}/{index}"
             value = self.ledger.get(key)
             if value is None:
@@ -44,34 +74,14 @@ class RABR:
                 cosines = (self.index.encode(descriptions[:v_max]) @ self.index.vectors.T).clip(-1, 1) if descriptions else []
                 scores = ground_round(self.index.ids, cosines, tau=float(self.config.get("tau", 0.0)), v_max=v_max)
                 value = {"scores": scores, "raw_output": raw, "parse_error": error, "seed": seed,
-                         "cost": dict(self.backend.last_generation), "context_sha256": digest(context)}
+                         "cost": dict(self.backend.last_generation), **expected}
                 self.ledger.put(key, value)
-            if value["context_sha256"] != digest(context):
-                raise ValueError("Input changed since generation checkpoint")
+            if any(value.get(key) != item for key, item in expected.items()):
+                raise ValueError("Input, profile or candidate-aware prompt changed since generation checkpoint")
             rounds.append(value["scores"])
+            candidates.update(value["scores"])
             traces.append(value)
-        cosines = (self.index.encode([context_text(context)])[0] @ self.index.vectors.T).clip(-1, 1)
-        relevance = {item: (1 + float(score)) / 2 for item, score in zip(self.index.ids, cosines)}
-        prefixes = prefix_scores(rounds, relevance, gamma=self.gamma)
-        if self.mode == "frequency_similarity" or self.ablation == "multi_sample_fixed_k":
-            counts, similarities, alternate = {}, {}, []
-            for number, scores in enumerate(rounds, 1):
-                for item, value in scores.items():
-                    counts[item] = counts.get(item, 0) + 1
-                    similarities.setdefault(item, []).append(value)
-                current = {}
-                for item, count in counts.items():
-                    frequency = count / number
-                    similarity = (math.fsum(similarities[item]) / count + relevance[item]) / 2
-                    if self.ablation in {"without_similarity", "multi_sample_fixed_k"}:
-                        current[item] = frequency
-                    elif self.ablation == "without_frequency":
-                        current[item] = similarity
-                    else:
-                        current[item] = self.gamma * frequency + (1 - self.gamma) * similarity
-                alternate.append(current)
-            prefixes = tuple(alternate)
-        return prefixes, traces
+        return prefix_scores(rounds, relevance, gamma=self.effective_gamma), traces
 
     def select(self, calibration_rows, k):
         fraction = float(self.config.get("calibration_fraction", 1.0))
@@ -84,7 +94,7 @@ class RABR:
         for row in rows:
             scores, _ = self.scores(row, budget, "calibration")
             examples.append(CalibrationExample({s: scores[s - 1] for s in self.grid.budgets}, frozenset(gold_items(row))))
-        if self.ablation in {"fixed_threshold", "fixed_k", "multi_sample_fixed_k"}:
+        if self.ablation in {"fixed_k", "multi_sample_fixed_k"}:
             selection = {"status": "uncertified_ablation", "budget": budget,
                          "threshold": float(self.config.get("fixed_threshold", .5)), "fixed_k": k}
             values = [self.bundle(example.scores_by_budget[budget], selection) for example in examples]
@@ -100,7 +110,8 @@ class RABR:
             values = [self.bundle(example.scores_by_budget[result.selected.budget], selection) for example in examples]
         selection.update(calibration_mean_bundle_size=sum(map(len, values)) / len(values),
                          calibration_session_ids=[row["session_id"] for row in rows],
-                         score_mode=self.mode, ablation=self.ablation,
+                         score_mode=self.mode, ablation=self.ablation, effective_gamma=self.effective_gamma,
+                         empty_history_policy=self.empty_history_policy,
                          guarantee="none_uncertified_ablation" if selection["status"] == "uncertified_ablation" else
                                    "conditional_on_bounded_loss_sampling_and_prefixed_grid_assumptions")
         return selection
