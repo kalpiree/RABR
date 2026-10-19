@@ -1,0 +1,18 @@
+{
+  "algorithm": {
+    "mode": "teacher_student",
+    "student_model": "${RABR_STUDENT_MODEL_PATH}",
+    "device": "cuda",
+    "epochs": 3,
+    "learning_rate": 0.0002,
+    "lora_rank": 16,
+    "lora_alpha": 16,
+    "gradient_accumulation": 4,
+    "max_sequence_length": 2048,
+    "minimum_support": 2,
+    "pattern_count": 8,
+    "rule_neighbors": 1,
+    "local_files_only": true,
+    "implementation": "teacher_rules_lora_student"
+  }
+}

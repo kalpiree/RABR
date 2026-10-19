@@ -1,0 +1,28 @@
+{
+  "algorithm": {
+    "implementation": "paper_based_reconstruction",
+    "device": "cpu",
+    "epochs": 100,
+    "batch_size": 16,
+    "learning_rate": 0.0003,
+    "weight_decay": 1e-05,
+    "patience": 10,
+    "grad_clip": 1.0,
+    "feature_dim": 128,
+    "dropout": 0.1,
+    "hidden_dim": 128,
+    "heads": 4,
+    "layers": 2,
+    "max_rounds": 20,
+    "max_attributes": 128,
+    "attribute_mask_probability": 0.5,
+    "ask_loss_weight": 1.0,
+    "online_epochs": 10,
+    "training_slots": 3,
+    "rl_learning_rate": 0.0003,
+    "ppo_updates": 2,
+    "ppo_clip": 0.2,
+    "gamma": 0.99,
+    "rl_batch_size": 128
+  }
+}

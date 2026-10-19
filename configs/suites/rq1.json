@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "profile": "experiment",
+  "domains": [
+    "electronic",
+    "clothing",
+    "food"
+  ],
+  "seeds": [
+    42,
+    43,
+    44,
+    45,
+    46
+  ],
+  "backbones": [
+    "qwen25-7b",
+    "llama31-8b"
+  ],
+  "defaults": {
+    "backend": {
+      "type": "transformers",
+      "temperature": 0.7,
+      "max_new_tokens": 256,
+      "device": "cuda:0",
+      "dtype": "bfloat16",
+      "allow_download": false
+    },
+    "algorithm": {
+      "budgets": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "thresholds": [
+        0.0,
+        0.05,
+        0.1,
+        0.15,
+        0.2,
+        0.25,
+        0.3,
+        0.35,
+        0.4,
+        0.45,
+        0.5,
+        0.55,
+        0.6,
+        0.65,
+        0.7,
+        0.75,
+        0.8,
+        0.85,
+        0.9,
+        0.95,
+        1.0
+      ],
+      "alpha": 0.05,
+      "delta": 0.05,
+      "beta": 1.0,
+      "gamma": 0.5,
+      "tau": 0.0,
+      "v_max": 8,
+      "score_mode": "equation8",
+      "ablation": "none",
+      "output_size_policy": "training_median",
+      "device": "cuda:0",
+      "cpu_threads": 4
+    }
+  },
+  "timeout_seconds": 21600,
+  "rq": "rq1",
+  "protocol_notes": [
+    "Fresh reconstruction: original partition IDs, prompts and checkpoints are unavailable.",
+    "Fixed-K methods use the final-training median; paper_rabr_mean is an optional calibration-only dependency policy.",
+    "KD4BG and DDBC are additional recent baselines; the manuscript contains the other nine methods."
+  ],
+  "experiments": [
+    {
+      "method": "pog",
+      "variant": "main"
+    },
+    {
+      "method": "bunt",
+      "variant": "main"
+    },
+    {
+      "method": "bgn",
+      "variant": "main"
+    },
+    {
+      "method": "byob",
+      "variant": "main"
+    },
+    {
+      "method": "zero_shot",
+      "variant": "main"
+    },
+    {
+      "method": "llm4b",
+      "variant": "main"
+    },
+    {
+      "method": "text2bundle",
+      "variant": "main"
+    },
+    {
+      "method": "aicl",
+      "variant": "main"
+    },
+    {
+      "method": "kd4bg",
+      "variant": "main"
+    },
+    {
+      "method": "ddbc",
+      "variant": "main"
+    },
+    {
+      "method": "rabr",
+      "variant": "main"
+    }
+  ]
+}

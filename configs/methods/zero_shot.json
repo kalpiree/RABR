@@ -1,0 +1,6 @@
+{
+  "algorithm": {
+    "grounding_tau": 0.0,
+    "implementation": "direct_product_generation"
+  }
+}

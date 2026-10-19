@@ -1,0 +1,30 @@
+{
+  "algorithm": {
+    "implementation": "paper_based_reconstruction",
+    "device": "cpu",
+    "epochs": 100,
+    "batch_size": 16,
+    "learning_rate": 0.0003,
+    "weight_decay": 1e-05,
+    "patience": 10,
+    "grad_clip": 1.0,
+    "feature_dim": 128,
+    "dropout": 0.1,
+    "hidden_dim": 64,
+    "heads": 4,
+    "reward_epochs": 10,
+    "training_bundle_size": 3,
+    "epsilon": 0.2,
+    "reward_weights": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "rl_learning_rate": 0.0003,
+    "ppo_updates": 2,
+    "ppo_clip": 0.2,
+    "gamma": 0.99,
+    "pointer_clip": 10.0,
+    "rl_batch_size": 128
+  }
+}

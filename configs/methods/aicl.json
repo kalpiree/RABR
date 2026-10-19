@@ -1,0 +1,12 @@
+{
+  "algorithm": {
+    "neighbors": 1,
+    "self_correction_rounds": 1,
+    "bundle_feedback_rounds": 3,
+    "intent_feedback_rounds": 1,
+    "intent_raters": 2,
+    "rater_repeats": 3,
+    "grounding_tau": 0.0,
+    "implementation": "train_neighbor_mutual_correction_auto_feedback"
+  }
+}

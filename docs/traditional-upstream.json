@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "reviewed_date": "2026-10-19",
+  "implementation": "Independent PyTorch reconstructions; no upstream source files vendored",
+  "methods": {
+    "pog": {
+      "paper": "https://arxiv.org/abs/1905.01866",
+      "official_release": "https://github.com/wenyuer/POG",
+      "official_release_scope": "dataset; model implementation not found in release",
+      "implemented_sections": [
+        "4.2 masked-item FOM",
+        "4.3 Per/Gen and sampled next-item objective"
+      ],
+      "profile": "RABR appendix layer/width configuration with text/category feature adaptation"
+    },
+    "bgn": {
+      "paper": "https://arxiv.org/abs/1904.01933",
+      "doi": "https://doi.org/10.1145/3308558.3313568",
+      "official_implementation": null,
+      "implemented_sections": [
+        "4.2 bundle Jaccard similarity",
+        "4.3 text-CNN, attention LSTM, feature-aware softmax",
+        "4.4 masked beam search and DPP at each expansion"
+      ],
+      "profile": "fixed-length full-catalog reconstruction; returns first bundle and retains diversified list"
+    },
+    "bunt": {
+      "paper": "https://arxiv.org/abs/2207.12628",
+      "official_implementation": "https://github.com/AaronHeee/Bundle-MCR",
+      "inspected_commit": "7de735848729e847efd7cc89a8f3c61fe7f695e0",
+      "license_file_found": false,
+      "inspected_files": [
+        "models/bunt_model.py",
+        "RL/environment.py",
+        "RL/optimization.py"
+      ],
+      "implemented_sections": [
+        "5.1 hierarchical transformer and slot state",
+        "5.2 item/category/attribute and manager policies",
+        "5.3 cloze pretraining",
+        "5.4 train-only simulated policy learning"
+      ],
+      "profile": "fixed slots; text-derived attributes; category consultation; target-free one-shot when no external respondent"
+    },
+    "byob": {
+      "paper": "https://crazynote.v.netease.com/2022/0704/a0bd31b6913c14c50bd641d4f4ced703.pdf",
+      "official_implementation": "https://github.com/fuxiAIlab/BYOB",
+      "inspected_commit": "538fb8de57fbc4f92dfb456b261a5150aab27121",
+      "license_file_found": false,
+      "inspected_files": [
+        "byob/models/policy_net.py",
+        "byob/models/sim_env.py",
+        "main_sim.py"
+      ],
+      "profile": "B-M reward branch; input-conditioned item preference and co-bundle compatibility models; clipped PPO with epsilon mixture"
+    }
+  }
+}

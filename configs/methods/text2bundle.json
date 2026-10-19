@@ -1,0 +1,29 @@
+{
+  "algorithm": {
+    "device": "cpu",
+    "hidden_size": 64,
+    "heads": 4,
+    "layers": 2,
+    "dropout": 0.1,
+    "graph_steps": 200,
+    "fm_steps": 200,
+    "pretrain_steps": 500,
+    "graph_layers": 3,
+    "graph_learning_rate": 0.001,
+    "learning_rate": 0.0001,
+    "updates": 20000,
+    "eval_every": 1000,
+    "batch_size": 32,
+    "replay_size": 20000,
+    "discount": 0.99,
+    "epsilon_min": 0.05,
+    "target_update": 100,
+    "candidate_count": 30,
+    "similarity_threshold": 0.0,
+    "history_length": 20,
+    "max_bundle_size": 8,
+    "main_reward_weight": 10.0,
+    "cpu_threads": 4,
+    "implementation": "train_graph_fm_transformer_double_dqn_shared_text_encoder"
+  }
+}

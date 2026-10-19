@@ -1,0 +1,20 @@
+{
+  "algorithm": {
+    "implementation": "paper_based_reconstruction",
+    "device": "cpu",
+    "epochs": 100,
+    "batch_size": 16,
+    "learning_rate": 0.0003,
+    "weight_decay": 1e-05,
+    "patience": 10,
+    "grad_clip": 1.0,
+    "feature_dim": 128,
+    "dropout": 0.1,
+    "hidden_dim": 64,
+    "heads": 4,
+    "layers": 2,
+    "beam_width": 20,
+    "bundle_list_size": 5,
+    "diversity": 0.1
+  }
+}
