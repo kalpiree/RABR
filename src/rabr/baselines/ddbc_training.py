@@ -1,4 +1,3 @@
-"""DDBC optimization, validation and resumable Torch state."""
 import collections
 import math
 import random
@@ -10,7 +9,7 @@ def cpu_limit(requested):
     return max(1, min(int(requested), available))
 
 def example_batches(rows, batch_size):
-    """Deterministic length groups, no padding and no discarded examples."""
+
     groups = collections.defaultdict(list)
     for row in rows:
         groups[len(row["item_indices"])].append(row)
@@ -20,11 +19,7 @@ def example_batches(rows, batch_size):
             yield group[start:start + batch_size]
 
 def draw_training_batch(rows, batch_size, rng):
-    """A uniform example chooses its length; conditional draws are uniform.
 
-    Thus every example has identical marginal sampling probability even when
-    length frequencies are very different. Adjacent swaps preserve membership.
-    """
     length = len(rows[rng.randrange(len(rows))]["item_indices"])
     group = [row for row in rows if len(row["item_indices"]) == length]
     result = []
@@ -117,8 +112,8 @@ class TorchEngine:
         return float(loss.detach().cpu())
 
     def validate(self, rows):
-        # Separate deterministic stream and eval mode: identical masks/times at
-        # every checkpoint; training/dropout RNG is untouched.
+
+
         generator = self.torch.Generator(device=self.device).manual_seed(self.args.seed + 3011)
         original = {key: value.detach().clone() for key, value in self.model.state_dict().items()}
         self.model.load_state_dict(self.ema)

@@ -1,4 +1,3 @@
-"""Bundle BERT with hierarchical policies and multiround feedback."""
 from __future__ import annotations
 
 import copy
@@ -14,7 +13,7 @@ from torch.nn import functional as F
 
 from rabr.io import atomic_json, digest, file_hash
 from rabr.types import Prediction, gold_items
-from .bunt_feedback import TargetFeedback
+from .feedback import TargetFeedback
 
 
 def _context(row):
@@ -165,7 +164,7 @@ class BUNT:
         self.fit_identity = digest({"version": 2, "train": train, "validation": validation, "catalog": catalog,
                                     "config": {key: value for key, value in self.config.items() if key != "work_dir"},
                                     "metadata_sha256": file_hash(metadata_path), "history_sha256": file_hash(history_path),
-                                    "code": {name: file_hash(Path(__file__).with_name(name)) for name in ("bunt.py", "bunt_feedback.py")}})
+                                    "code": {name: file_hash(Path(__file__).with_name(name)) for name in ("bunt.py", "feedback.py")}})
 
     def _history(self, context):
         if any(key in context for key in ("target", "target_items", "gold_items")):

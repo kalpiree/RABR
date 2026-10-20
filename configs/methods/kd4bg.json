@@ -13,7 +13,6 @@
     "pattern_count": 8,
     "rule_neighbors": 1,
     "local_files_only": true,
-    "implementation": "teacher_rules_lora_student",
     "teacher_backend": {
       "type": "transformers",
       "model_path": "${RABR_KD_TEACHER_PATH}",

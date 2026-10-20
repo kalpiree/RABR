@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from .data import atomic_json, file_hash, load_dataset
-from .suite import source_hash
+from .experiments import source_hash
 
 
 def contained(root, relative):
@@ -157,9 +157,9 @@ def run_queue(path, *, cpu_workers=1, gpu_ids=(), cpu_threads=4, poll_seconds=1,
         from .run import code_hash
         expected_code_hash = code_hash()
     if any(job["resource"] == "gpu" for job in manifest["jobs"]) and not gpu_ids:
-        raise ValueError("This suite requires at least one GPU worker")
+        raise ValueError("These experiments require at least one GPU worker")
     if any(job["resource"] == "cpu" for job in manifest["jobs"]) and not cpu_workers:
-        raise ValueError("This suite requires at least one CPU worker")
+        raise ValueError("These experiments require at least one CPU worker")
     slots = [("cpu", str(i)) for i in range(cpu_workers)] + [("gpu", str(i)) for i in gpu_ids]
     state_dir = root / "state"
     state_dir.mkdir(exist_ok=True)

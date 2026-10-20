@@ -1,11 +1,5 @@
-"""Discrete masked diffusion over residual-quantized item codes.
-
-Modified from the DDBC/MDLM architecture; see THIRD_PARTY_NOTICES.md.
-MDLM: Copyright 2024 Cornell University, Apache License 2.0.
-Changes include SDPA attention, code-token loss normalization, and
-seed-conditioned levelwise sampling and an optional catalog-constrained adapter.
-"""
-
+# MDLM: Copyright 2024 Cornell University. Apache-2.0; see LICENSE.
+# Modified: SDPA attention, loss normalization and seed-conditioned sampling.
 from __future__ import annotations
 
 import math
@@ -21,7 +15,7 @@ MODEL_VERSION = "ddbc-clhe-levelwise-v2"
 
 
 class LayerNorm(nn.Module):
-    """Upstream float32 normalization with trainable scale, no learned bias."""
+
 
     def __init__(self, dim: int):
         super().__init__()
@@ -46,7 +40,7 @@ class Rotary(nn.Module):
 
 
 def apply_rotary(q: Tensor, k: Tensor, cos: Tensor, sin: Tensor) -> tuple[Tensor, Tensor]:
-    """FlashAttention's default noninterleaved half-rotation; values unchanged."""
+
     def rotate(x: Tensor) -> Tensor:
         first, second = x.chunk(2, dim=-1)
         return torch.cat((first * cos - second * sin, second * cos + first * sin), dim=-1)
@@ -54,7 +48,7 @@ def apply_rotary(q: Tensor, k: Tensor, cos: Tensor, sin: Tensor) -> tuple[Tensor
 
 
 def sdpa_attention(q: Tensor, k: Tensor, v: Tensor, attention_mask: Tensor | None = None) -> Tensor:
-    """q/k/v are [batch, heads, length, head_dim]; attention dropout is zero."""
+
     allowed = None if attention_mask is None else attention_mask[:, None, None, :].bool()
     return F.scaled_dot_product_attention(q, k, v, attn_mask=allowed, dropout_p=0.0, is_causal=False)
 
@@ -145,7 +139,7 @@ class DDitFinalLayer(nn.Module):
 
 
 class DDBCModel(nn.Module):
-    """Audited upstream DDiT backbone, returning raw vocabulary logits."""
+
 
     def __init__(self, vocab_size: int, codebook_weights: Tensor | None = None,
                  hidden_size: int = 64, n_blocks: int = 6, n_heads: int = 8,
@@ -183,14 +177,14 @@ class DDBCModel(nn.Module):
 
 
 def loglinear_noise(t: Tensor, eps: float = 1e-3) -> tuple[Tensor, Tensor]:
-    """Upstream LogLinearNoise: survival 1-(1-eps)*t."""
+
     if not 0 < eps < 1:
         raise ValueError("noise epsilon must be between zero and one")
     return -torch.log1p(-(1 - eps) * t), (1 - eps) / (1 - (1 - eps) * t)
 
 
 def subs_log_probs(logits: Tensor, corrupted_ids: Tensor, mask_token_id: int) -> Tensor:
-    """SUBS: exclude MASK from clean predictions; clamp every observed token."""
+
     logits = logits.float().clone()
     logits[..., mask_token_id] = -torch.inf
     predicted = logits.log_softmax(dim=-1)
@@ -205,12 +199,7 @@ def masked_diffusion_loss(model: nn.Module, clean_ids: Tensor, code_mask: Tensor
                           antithetic: bool = True, reduction: str = "mean",
                           return_details: bool = False,
                           attention_mask: Tensor | None = None) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
-    """Released weighted absorbing-mask CE, normalized per code token/example.
 
-    The generator must match clean_ids.device. Fixed t plus a reset generator
-    makes validation corruption reproducible. This function does not switch
-    model.train()/eval(), and does not force a mask when none were sampled.
-    """
     if clean_ids.ndim != 2 or code_mask.shape != clean_ids.shape or code_mask.dtype != torch.bool:
         raise ValueError("clean_ids/code_mask must be matching [B,L], code_mask bool")
     if not 0 < sampling_eps < 1:
@@ -238,7 +227,7 @@ def masked_diffusion_loss(model: nn.Module, clean_ids: Tensor, code_mask: Tensor
         logits = model(corrupted, sigma, attention_mask=attention_mask)
     log_probs = subs_log_probs(logits, corrupted, mask_token_id)
     token_nll = -log_probs.gather(-1, clean_ids[..., None]).squeeze(-1)
-    # Unmasked ground-truth tokens have exactly log probability zero under SUBS.
+
     weighted = torch.where(masked, token_nll, 0.0) * (dsigma / torch.expm1(sigma))[:, None]
     per_example = weighted.sum(dim=1) / counts
     if reduction == "mean":
@@ -256,7 +245,7 @@ def masked_diffusion_loss(model: nn.Module, clean_ids: Tensor, code_mask: Tensor
 
 
 def serialize_item_codes(item_codes: Tensor, bos_id: int, boi_id: int, eos_id: int) -> tuple[Tensor, Tensor]:
-    """[B,K,L] -> BOS (BOI code[0:L])*K EOS, with code-position mask."""
+
     if item_codes.ndim != 3:
         raise ValueError("item_codes must be [B,K,L]")
     batch, count, depth = item_codes.shape
@@ -272,14 +261,13 @@ def serialize_item_codes(item_codes: Tensor, bos_id: int, boi_id: int, eos_id: i
 
 
 def _can_assign_distinct(candidate_sets: Sequence[set[int]]) -> bool:
-    """Small exact bipartite matching; prevents duplicate-only dead ends."""
+
     if any(not candidates for candidates in candidate_sets):
         return False
     assignment: dict[int, int] = {}
     def augment(slot: int, seen: set[int]) -> bool:
-        # With m slots, retaining any m alternatives from a larger set cannot
-        # destroy a matching: at most m-1 alternatives can be occupied elsewhere.
-        # Avoid sorting thousands of catalog IDs for every candidate token.
+
+
         for item in islice(candidate_sets[slot], len(candidate_sets)):
             if item in seen:
                 continue
@@ -300,15 +288,7 @@ def sample_bundles(model: nn.Module, catalog_codes: Tensor, seed_item_indices: T
                    *, total_items: int = 3, steps: int = 25, temperature: float = 1.0,
                    generator: torch.Generator | None = None,
                    return_diagnostics: bool = False) -> Tensor | tuple[Tensor, dict[str, Any]]:
-    """One observed seed -> full-catalog, distinct-item bundle via DDBC denoising.
 
-    Catalog codes are [N,L] globally offset integer token IDs (including the
-    collision digit); all tuples must be unique. Seed indices are [B]. No gold
-    labels are accepted. Structural tokens, seed tokens, and already revealed
-    codes remain clamped. Reveal probability is (t-s)/t = 1/remaining_steps.
-    Full-catalog feasibility constraints never consult item titles or targets.
-    temperature=0 is greedy code selection; reveal order remains stochastic.
-    """
     if catalog_codes.ndim != 2 or catalog_codes.dtype != torch.long:
         raise ValueError("catalog_codes must be an int64 [N,L] tensor")
     if seed_item_indices.ndim != 1 or seed_item_indices.dtype != torch.long:
@@ -360,7 +340,7 @@ def sample_bundles(model: nn.Module, catalog_codes: Tensor, seed_item_indices: T
             still_masked = unknown & (tokens == mask_id)
             reveal = still_masked & (torch.rand(tokens.shape, device=device, generator=generator) < 1.0 / remaining)
             positions = reveal.nonzero(as_tuple=False)
-            # Random token-level reveal order avoids a fixed item completion order.
+
             order = torch.randperm(len(positions), device=device, generator=generator)
             for row, position in positions[order].cpu().tolist():
                 slot, level = divmod(position - 2, depth + 1)

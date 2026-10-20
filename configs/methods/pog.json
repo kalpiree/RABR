@@ -1,7 +1,5 @@
 {
   "algorithm": {
-    "implementation": "paper_multimodal_FOM_POG",
-    "feature_profile": "InceptionResNetV2_TextCNN_Behemoth",
     "pog_assets_path": "${POG_ASSETS_PATH}",
     "device": "cpu",
     "hidden_dim": 64,

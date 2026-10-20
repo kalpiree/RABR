@@ -4,7 +4,7 @@ from dataclasses import asdict
 import math
 import json
 
-from .baselines.llm_common import CatalogIndex, context_text, parse_items
+from .baselines.common import CatalogIndex, context_text, parse_items
 from .calibration import CalibrationExample, CalibrationGrid, calibrate, ground_round, prefix_scores, select_bundle
 from .io import digest, stable_seed
 from .types import gold_items, input_only

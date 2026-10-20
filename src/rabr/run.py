@@ -174,7 +174,7 @@ def _execute(config_path, data_root, domain, output, seed):
         reference = verify_result(reference_path)
         expected = algorithm.get("rabr_reference_identity", {})
         if any(reference.get(key) != value for key, value in expected.items()):
-            raise ValueError("RABR reference differs from the declared suite dependency")
+            raise ValueError("RABR reference differs from the declared experiment dependency")
         if (reference["status"] != "complete" or reference["method"] != "rabr" or reference["domain"] != domain
                 or reference["seed"] != seed or reference["data_manifest_sha256"] != dataset.manifest_sha256
                 or reference["profile"] != config["profile"] or reference["code_sha256"] != identity["code_sha256"]):
@@ -242,7 +242,7 @@ def _execute(config_path, data_root, domain, output, seed):
                 if config["method"] == "bunt":
                     if algorithm.get("evaluation_protocol") != "interactive_target_feedback":
                         raise ValueError("BUNT evaluation requires an explicitly configured interactive respondent protocol")
-                    from .baselines.bunt_feedback import TargetFeedback
+                    from .baselines.feedback import TargetFeedback
                     evaluation_context["feedback_provider"] = TargetFeedback(
                         gold_items(row), predictor.metadata, protocol="heldout_evaluation")
                 value = predictor.predict(evaluation_context, k, stable_seed(seed, "test", context["session_id"]))

@@ -1,6 +1,0 @@
-numpy==1.26.4
-torch==2.4.1
-transformers==4.44.2
-accelerate==0.34.2
-faiss-cpu==1.8.0
-peft==0.12.0

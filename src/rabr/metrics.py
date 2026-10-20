@@ -37,7 +37,7 @@ def _f_beta(tp, gold_count, predicted_count, beta):
     return (1 + squared) * tp / (predicted_count + squared * gold_count)
 
 def evaluate_records(records, beta=1.0):
-    """Return (summary, per_session_rows); reject ambiguous or invalid inputs."""
+
     beta = _validated_beta(beta)
     seen = set()
     per_session = []

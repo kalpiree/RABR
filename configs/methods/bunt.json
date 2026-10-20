@@ -1,6 +1,5 @@
 {
   "algorithm": {
-    "implementation": "bundle_mcr_paper_reimplementation",
     "evaluation_protocol": "interactive_target_feedback",
     "catalog_metadata_path": "${RABR_BUNT_METADATA_PATH}",
     "history_bundles_path": "${RABR_BUNT_HISTORY_PATH}",

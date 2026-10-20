@@ -1,6 +1,5 @@
 {
   "algorithm": {
-    "implementation": "external_amazon_lightgcn_fm_roberta_double_dqn",
     "lightgcn_assets_path": "${RABR_T2B_LIGHTGCN_PATH}",
     "fm_assets_path": "${RABR_T2B_FM_PATH}",
     "text_encoder_path": "${RABR_T2B_ROBERTA_PATH}",
@@ -14,7 +13,7 @@
     "layers": 1,
     "dropout": 0.1,
     "pretrain_steps": 500,
-    "learning_rate": 0.00005,
+    "learning_rate": 5e-05,
     "updates": 20000,
     "eval_every": 1000,
     "batch_size": 256,

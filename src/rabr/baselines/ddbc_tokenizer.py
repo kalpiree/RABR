@@ -1,7 +1,5 @@
-"""PCA whitening and residual-quantized catalog item identifiers."""
-
 def pca_whiten(vectors, components=64):
-    """Deterministic full-SVD PCA, sklearn's whiten=True scaling and sign rule."""
+
     import numpy as np
     vectors = np.asarray(vectors, dtype=np.float64)
     if vectors.ndim != 2 or min(vectors.shape) <= components or not np.isfinite(vectors).all():
@@ -19,7 +17,7 @@ def pca_whiten(vectors, components=64):
     return reduced.astype(np.float32), {"mean": mean, "components": vt[:components], "scale": scale}
 
 def extend_codes(raw_codes, codebook_size):
-    """Official occurrence-index fourth digit, deterministic catalog order."""
+
     import numpy as np
     raw = np.asarray(raw_codes)
     if raw.ndim != 2 or raw.shape[1] != 3 or not np.issubdtype(raw.dtype, np.integer):

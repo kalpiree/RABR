@@ -37,7 +37,7 @@ def _scores(values: Mapping[str, float], name: str='scores') -> dict[str, float]
     return {_item(item): _number(value, name, 0.0, 1.0) for item, value in values.items()}
 
 def ground_round(catalog_items: Sequence[str], description_cosines: Sequence[Sequence[float]], *, tau: float, v_max: int) -> dict[str, float]:
-    """Equations 3–7: retain first v_max rows, ground, then average per item."""
+
     tau = _number(tau, 'tau', -1.0, 1.0)
     v_max = _budget(v_max, 'v_max')
     if isinstance(catalog_items, (str, bytes)):
@@ -56,7 +56,7 @@ def ground_round(catalog_items: Sequence[str], description_cosines: Sequence[Seq
     return {item: math.fsum(scores) / len(scores) for item, scores in values.items()}
 
 def prefix_scores(round_scores: Sequence[Mapping[str, float]], user_relevance: Mapping[str, float], *, gamma: float) -> tuple[dict[str, float], ...]:
-    """Equations 6–8: cumulative candidate union and matching-round averages."""
+
     gamma = _number(gamma, 'gamma', 0.0, 1.0)
     relevance = _scores(user_relevance, 'user relevance')
     matching_rounds: dict[str, list[float]] = {}
@@ -70,12 +70,12 @@ def prefix_scores(round_scores: Sequence[Mapping[str, float]], user_relevance: M
     return tuple(prefixes)
 
 def select_bundle(scores: Mapping[str, float], threshold: float) -> frozenset[str]:
-    """Equation 9, including items whose scores equal the threshold."""
+
     threshold = _number(threshold, 'threshold', 0.0, 1.0)
     return frozenset((item for item, score in _scores(scores).items() if score >= threshold))
 
 def fbeta_loss(predicted, truth, beta: float=1.0) -> float:
-    """Equation 11 on item sets, with explicit two-empty-set convention."""
+
     beta = _number(beta, 'beta', 0.0, math.inf, open_interval=True)
     predicted, truth = (_items(predicted), _items(truth))
     if not predicted and (not truth):
@@ -95,13 +95,13 @@ def fbeta_loss(predicted, truth, beta: float=1.0) -> float:
     return min(1.0, max(0.0, 1.0 - hits / denominator))
 
 def mean_loss(predictions: Sequence, truths: Sequence, beta: float=1.0) -> float:
-    """Equation 13, an unweighted mean over the supplied calibration examples."""
+
     if not predictions or len(predictions) != len(truths):
         raise ValueError('Predictions/truths must have the same positive length')
     return math.fsum((fbeta_loss(pred, truth, beta) for pred, truth in zip(predictions, truths))) / len(predictions)
 
 def bernoulli_kl(p: float, q: float) -> float:
-    """Bernoulli KL in natural-log units, including endpoint limits."""
+
     p, q = (_number(p, 'p', 0.0, 1.0), _number(q, 'q', 0.0, 1.0))
     if p == q:
         return 0.0
@@ -115,7 +115,7 @@ def bernoulli_kl(p: float, q: float) -> float:
     return max(0.0, math.fsum(terms))
 
 def log_risk_pvalue(empirical_risk: float, alpha: float, n_cal: int) -> float:
-    """Equation 14; equality Rhat==alpha returns log(1), without tolerance."""
+
     risk = _number(empirical_risk, 'empirical risk', 0.0, 1.0)
     alpha = _number(alpha, 'alpha', 0.0, 1.0, open_interval=True)
     n_cal = _budget(n_cal, 'n_cal')
@@ -126,7 +126,7 @@ def risk_pvalue(empirical_risk: float, alpha: float, n_cal: int) -> float:
 
 @dataclass(frozen=True)
 class CalibrationGrid:
-    """Finite grids supplied before calibration, frozen and sorted on creation."""
+
     budgets: tuple[int, ...]
     thresholds: tuple[float, ...]
 
@@ -146,7 +146,7 @@ class CalibrationGrid:
 
 @dataclass(frozen=True)
 class CalibrationExample:
-    """One example's frozen cached prefix scores and complete ground-truth set."""
+
     scores_by_budget: Mapping[int, Mapping[str, float]]
     truth: frozenset[str]
 
@@ -185,7 +185,7 @@ class CalibrationResult:
     log_bonferroni_cutoff: float
 
 def calibrate(examples: Sequence[CalibrationExample], grid: CalibrationGrid, *, alpha: float, delta: float, beta: float=1.0) -> CalibrationResult:
-    """Equations 13–17/Algorithm 2, with no fallback on failed certification."""
+
     if not isinstance(grid, CalibrationGrid):
         raise ValueError('Supply an explicit CalibrationGrid')
     examples = tuple(examples)

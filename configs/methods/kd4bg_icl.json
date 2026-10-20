@@ -1,0 +1,8 @@
+{
+  "algorithm": {
+    "mode": "pattern_icl",
+    "minimum_support": 2,
+    "pattern_count": 8,
+    "grounding_tau": 0.0
+  }
+}

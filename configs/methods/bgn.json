@@ -1,7 +1,5 @@
 {
   "algorithm": {
-    "implementation": "paper_sampled_FA_BGN",
-    "feature_profile": "item_and_category_ID_embeddings",
     "device": "cpu",
     "hidden_dim": 64,
     "heads": 4,

@@ -6,7 +6,6 @@
     "intent_feedback_rounds": 1,
     "rater_repeats": 3,
     "grounding_tau": 0.0,
-    "implementation": "train_neighbor_mutual_correction_auto_feedback",
     "intent_evaluator_backends": [
       {
         "type": "transformers",

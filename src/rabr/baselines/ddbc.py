@@ -1,4 +1,3 @@
-"""Train and sample a residual-code masked diffusion recommender."""
 from __future__ import annotations
 from argparse import Namespace
 import hashlib
@@ -6,7 +5,7 @@ import json
 from pathlib import Path
 import numpy as np
 from rabr.types import Prediction
-from .llm_common import CatalogIndex, context_text
+from .common import CatalogIndex, context_text
 from .ddbc_tokenizer import pca_whiten, extend_codes, faiss_quantize, load_clhe_features, retrieve_generated_codes
 
 

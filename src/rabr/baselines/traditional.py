@@ -1,4 +1,3 @@
-"""Factories for trainable traditional bundle-generation methods."""
 from __future__ import annotations
 
 
@@ -10,8 +9,9 @@ def create_traditional(name: str, config: dict):
         if name == "bunt":
             from .bunt import BUNT
             return BUNT(dict(config))
-        from .traditional_models import POG, BGN
-        from .traditional_policies import BYOB
+        from .pog import POG
+        from .bgn import BGN
+        from .byob import BYOB
     except ImportError as error:
         if error.name == "torch":
             raise ImportError("Traditional methods require the 'models' optional dependencies (PyTorch).") from error

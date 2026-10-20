@@ -12,7 +12,6 @@
     "pca_dimensions": 0,
     "tokenizer_seed": 42,
     "cpu_threads": 8,
-    "implementation": "released_clhe_rvq_levelwise_diffusion_with_full_catalog_evaluation",
     "feature_mode": "clhe",
     "clhe_manifest": "${RABR_DDBC_CLHE_MANIFEST}",
     "context_mode": "provided_seed_items",
