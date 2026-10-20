@@ -1,5 +1,3 @@
-# MDLM: Copyright 2024 Cornell University. Apache-2.0; see LICENSE.
-# Modified: SDPA attention, loss normalization and seed-conditioned sampling.
 from __future__ import annotations
 
 import math

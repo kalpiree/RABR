@@ -19,8 +19,5 @@ quantization = ["bitsandbytes>=0.43,<1; platform_system == 'Linux'"]
 [project.scripts]
 rabr-run = "rabr.run:main"
 
-[tool.setuptools]
-license-files = ["LICENSE"]
-
 [tool.setuptools.packages.find]
 where = ["src"]
